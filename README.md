@@ -1,11 +1,11 @@
-# Supercut Extended  v1.0.0
+# Supercut Extended
 
 Outplayed の Supercut を **GPU (NVENC)** で作り直す外部ツール。
 イベント検出と録画は Outplayed のものをそのまま使い、**結合・エンコードの工程だけを置き換える**。
 
 ---
 
-## なぜ作ったか
+## 背景
 
 Outplayed は録画も手動エクスポートも既に GPU を使っているのに、**Supercut だけが CPU の libx264**
 で処理している。`ffprobe` の `TAG:encoder` で経路ごとに確認した結果:
@@ -44,16 +44,13 @@ Outplayed は録画も手動エクスポートも既に GPU を使っている�
 
 ### exe 版（ビルド済み）
 
-`dist\SupercutExtended\` の中の **`SupercutExtended.exe`** を起動するだけ。
+**`SupercutExtended.exe`** を起動するだけ。
+※前提としてOutPlayedを利用していること。
 
 | ファイル | 用途 |
 |---|---|
 | `SupercutExtended.exe` | GUI 本体 |
 | `SupercutExtended-cli.exe` | コマンドライン版（`... list` など） |
-
-**ffmpeg は同梱していない**（サイズと GPL 再配布の都合）。PATH に ffmpeg があればそのまま動く。
-別 PC に持っていく場合は `ffmpeg.exe` と `ffprobe.exe` を **exe と同じフォルダ**に置けば認識する
-（`ffmpeg\` や `bin\` サブフォルダでも可）。見つからない場合は起動時にその旨を表示する。
 
 自分でビルドし直す場合:
 
