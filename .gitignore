@@ -2,6 +2,11 @@ requirements.txt
 
 # Icons Folder
 cooliocns SVG/
+assets/
+
+# Vendored ffmpeg binaries (fetched via tools/fetch_ffmpeg.py, GPLv3, ~200MB)
+vendor/ffmpeg/*.exe
+vendor/ffmpeg/*.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

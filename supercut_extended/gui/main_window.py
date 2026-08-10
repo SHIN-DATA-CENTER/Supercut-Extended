@@ -20,11 +20,11 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import __version__, updater
-from ..encoder import EncoderSpec, available_encoders
+from ..encoder import EncoderSpec, available_encoders, group_by_engine, vendor_label
 from ..library import matches_with_highlights, read_matches
 from ..model import HIGHLIGHT_KINDS, Match, Media
 from ..probe import MediaInfo, probe
@@ -36,6 +36,13 @@ from .player import VideoPlayer
 from .style import ACCENT_HI, TEXT, TEXT_DIM, build_style, checkbox_style
 from .timeline import TimelineWidget, event_color
 from .update_dialog import UpdateCheck, UpdateDialog
+
+# CQ/QP/CRF-style quality values, all on the same "lower is better, bigger file"
+# scale ffmpeg uses for -cq/-global_quality/-qp_i/-crf -- one shared friendly scale
+# is enough because every encoder branch in encoder.video_args() already applies the
+# same number without per-vendor rescaling.
+QUALITY_TIERS = (18, 21, 23, 26, 30)
+DEFAULT_QUALITY = 23
 
 
 class LibraryLoader(QThread):
@@ -400,17 +407,46 @@ class MainWindow(QMainWindow):
         self.mode_encode.setChecked(True)
         self.mode_encode.toggled.connect(self._on_mode_changed)
 
-        self.encoder_combo = self._combo()
-        self.preset_combo = self._combo(fixed=False)
-        self.quality_spin = QSpinBox(minimum=10, maximum=40)
-        self.quality_spin.setValue(23)
-        self.encoder_combo.currentIndexChanged.connect(self._on_encoder_changed)
+        # Two plain-language questions -- "CPU or GPU", then "which quality type" --
+        # instead of one combo box listing raw ffmpeg encoder names like
+        # "h264_nvenc". The actual EncoderSpec is resolved from whichever pair of
+        # radio buttons is checked (see _current_spec).
+        engine_label = QLabel(tr("out.engine"))
+        engine_label.setObjectName("fieldLabel")
+        self.engine_gpu = QRadioButton(tr("out.engine.gpu"))
+        self.engine_cpu = QRadioButton(tr("out.engine.cpu"))
+        self.engine_gpu.toggled.connect(self._on_engine_changed)
+        self.engine_detected = caption("")
+        engine_block = block(
+            engine_label, self.engine_gpu, self.engine_cpu, self.engine_detected,
+            spacing=4)
 
-        erow = QHBoxLayout()
-        erow.setSpacing(6)
-        erow.addLayout(self._field(tr("out.preset"), self.preset_combo))
-        erow.addLayout(self._field(tr("out.quality"), self.quality_spin))
-        erow.addStretch(1)
+        codec_label = QLabel(tr("out.codec"))
+        codec_label.setObjectName("fieldLabel")
+        self.codec_h264 = QRadioButton(tr("out.codec.h264"))
+        self.codec_hevc = QRadioButton(tr("out.codec.hevc"))
+        self.codec_h264.setChecked(True)
+        self.codec_h264.toggled.connect(self._on_codec_changed)
+        codec_block = block(
+            codec_label,
+            self.codec_h264, caption(tr("out.codec.h264.desc")),
+            self.codec_hevc, caption(tr("out.codec.hevc.desc")),
+            spacing=4)
+
+        # Each item pairs a plain-language tier with the actual ffmpeg value in
+        # parentheses ("Balanced (23)") -- the raw preset name / CQ number is still
+        # what rides along as the item's data and gets passed to ffmpeg. Full-width
+        # (not `fixed=False` side by side) because these run longer than a bare
+        # "p4"/"23" and were getting elided in a shared half-width row.
+        self.preset_combo = self._combo()
+        self.quality_combo = self._combo()
+        for cq in QUALITY_TIERS:
+            label = f"{tr(f'quality.{cq}')} ({cq})"
+            if cq == DEFAULT_QUALITY:
+                label = tr("out.preset.recommended", name=label)
+            self.quality_combo.addItem(label, cq)
+        self.quality_combo.setCurrentIndex(QUALITY_TIERS.index(DEFAULT_QUALITY))
+        self.quality_combo.currentIndexChanged.connect(self._recompute)
 
         self.audio_combo = self._combo()
 
@@ -425,14 +461,26 @@ class MainWindow(QMainWindow):
         orow.addWidget(self.output_edit, 1)
         orow.addWidget(browse)
 
+        mode_block = block(
+            self.mode_encode, caption(tr("out.mode.encode.desc")),
+            self.mode_copy, caption(tr("out.mode.copy.desc")))
+
+        speed_quality_block = block(
+            self._field(tr("out.preset"), self.preset_combo),
+            self._field(tr("out.quality"), self.quality_combo))
+
+        # Wider spacing than the 4-8px used inside each sub-block, so "mode",
+        # "processing", "quality type" and the preset/quality row read as distinct
+        # questions rather than one dense list of radio buttons.
         lay.addWidget(block(
             section(tr("group.output"), "Interface/Download"),
-            self.mode_encode, caption(tr("out.mode.encode.desc")),
-            self.mode_copy, caption(tr("out.mode.copy.desc")),
-            self._field(tr("out.encoder"), self.encoder_combo),
-            erow,
+            mode_block,
+            engine_block,
+            codec_block,
+            speed_quality_block,
             self._field(tr("out.audio"), self.audio_combo),
-            self._field(tr("out.file"), orow)))
+            self._field(tr("out.file"), orow),
+            spacing=14))
 
         # --- action
         self.summary = QLabel("")
@@ -516,24 +564,64 @@ class MainWindow(QMainWindow):
         return s
 
     def _populate_encoders(self) -> None:
+        self._groups: dict[tuple[bool, str], EncoderSpec] = {}
         try:
             specs = available_encoders()
         except Exception as exc:
             self._specs: list[EncoderSpec] = []
-            self.encoder_combo.addItem(tr("encoder.missing"), "")
+            self.engine_detected.setText(tr("encoder.missing"))
+            self.engine_gpu.setEnabled(False)
+            self.engine_cpu.setEnabled(False)
+            self.codec_h264.setEnabled(False)
+            self.codec_hevc.setEnabled(False)
             QMessageBox.critical(self, tr("err.ffmpeg.title"), str(exc))
             return
+
         self._specs = list(specs)
-        for spec in specs:
-            self.encoder_combo.addItem(spec.label, spec.name)
+        self._groups = group_by_engine(specs)
+
+        # PC-spec auto-detection: available_encoders() already probed this machine by
+        # actually encoding a few frames with each candidate (see encoder.py), so
+        # "recommended" just means "the best thing that was proven to work here".
+        gpu_spec = self._groups.get((True, "h264")) or self._groups.get((True, "hevc"))
+        if gpu_spec is not None:
+            self.engine_detected.setText(
+                tr("out.engine.detected.gpu", vendor=vendor_label(gpu_spec.name)))
+            self.engine_gpu.setChecked(True)
+        else:
+            self.engine_detected.setText(tr("out.engine.detected.cpu_only"))
+            self.engine_cpu.setChecked(True)
+
         if not specs:
-            self.encoder_combo.addItem(tr("encoder.missing"), "")
-        elif not specs[0].hardware:
-            self.statusBar().showMessage(tr("warn.cpu"), 10000)
-        self._on_encoder_changed()
+            self.engine_detected.setText(tr("encoder.missing"))
+
+        self._on_engine_changed()
 
         for w in (self.pre_spin, self.post_spin, self.gap_spin):
             w.valueChanged.connect(self._recompute)
+
+    def _gpu_available(self) -> bool:
+        return (True, "h264") in self._groups or (True, "hevc") in self._groups
+
+    def _current_spec(self) -> EncoderSpec | None:
+        codec = "hevc" if self.codec_hevc.isChecked() else "h264"
+        return self._groups.get((self.engine_gpu.isChecked(), codec))
+
+    def _apply_output_control_states(self) -> None:
+        encoding = self.mode_encode.isChecked()
+        gpu_ok = self._gpu_available()
+        self.engine_gpu.setEnabled(encoding and gpu_ok)
+        self.engine_gpu.setToolTip("" if gpu_ok else tr("out.engine.gpu_unavailable"))
+        self.engine_cpu.setEnabled(encoding)
+        gpu = self.engine_gpu.isChecked()
+        has_h264 = (gpu, "h264") in self._groups
+        has_hevc = (gpu, "hevc") in self._groups
+        self.codec_h264.setEnabled(encoding and has_h264)
+        self.codec_h264.setToolTip("" if has_h264 else tr("out.codec.unavailable"))
+        self.codec_hevc.setEnabled(encoding and has_hevc)
+        self.codec_hevc.setToolTip("" if has_hevc else tr("out.codec.unavailable"))
+        self.preset_combo.setEnabled(encoding)
+        self.quality_combo.setEnabled(encoding)
 
     # -- persistence --------------------------------------------------------
     def _restore_settings(self) -> None:
@@ -543,15 +631,25 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geo)
         if s.value("mode", "encode") == "copy":
             self.mode_copy.setChecked(True)
-        enc = s.value("encoder")
-        if enc:
-            i = self.encoder_combo.findData(enc)
-            if i >= 0:
-                self.encoder_combo.setCurrentIndex(i)
+        engine = s.value("engine")
+        if engine == "gpu" and self.engine_gpu.isEnabled():
+            self.engine_gpu.setChecked(True)
+        elif engine == "cpu":
+            self.engine_cpu.setChecked(True)
+        codec = s.value("codec")
+        if codec == "hevc" and self.codec_hevc.isEnabled():
+            self.codec_hevc.setChecked(True)
+        elif codec == "h264":
+            self.codec_h264.setChecked(True)
         preset = s.value("preset")
-        if preset and self.preset_combo.findText(preset) >= 0:
-            self.preset_combo.setCurrentText(preset)
-        self.quality_spin.setValue(int(s.value("quality", 23)))
+        if preset:
+            i = self.preset_combo.findData(preset)
+            if i >= 0:
+                self.preset_combo.setCurrentIndex(i)
+        quality = int(s.value("quality", DEFAULT_QUALITY))
+        i = self.quality_combo.findData(quality)
+        if i >= 0:
+            self.quality_combo.setCurrentIndex(i)
         self.use_defaults.setChecked(s.value("use_defaults", "true") == "true")
         self.pre_spin.setValue(float(s.value("pre", 8.0)))
         self.post_spin.setValue(float(s.value("post", 2.0)))
@@ -563,9 +661,10 @@ class MainWindow(QMainWindow):
         s = self.settings
         s.setValue("geometry", self.saveGeometry())
         s.setValue("mode", "copy" if self.mode_copy.isChecked() else "encode")
-        s.setValue("encoder", self.encoder_combo.currentData() or "")
-        s.setValue("preset", self.preset_combo.currentText())
-        s.setValue("quality", self.quality_spin.value())
+        s.setValue("engine", "gpu" if self.engine_gpu.isChecked() else "cpu")
+        s.setValue("codec", "hevc" if self.codec_hevc.isChecked() else "h264")
+        s.setValue("preset", self.preset_combo.currentData() or "")
+        s.setValue("quality", self.quality_combo.currentData() or DEFAULT_QUALITY)
         s.setValue("use_defaults", "true" if self.use_defaults.isChecked() else "false")
         s.setValue("pre", self.pre_spin.value())
         s.setValue("post", self.post_spin.value())
@@ -707,19 +806,35 @@ class MainWindow(QMainWindow):
         self._recompute()
 
     def _on_mode_changed(self) -> None:
-        encoding = self.mode_encode.isChecked()
-        for w in (self.encoder_combo, self.preset_combo, self.quality_spin):
-            w.setEnabled(encoding)
+        self._apply_output_control_states()
         self._recompute()
 
-    def _on_encoder_changed(self) -> None:
+    def _on_engine_changed(self) -> None:
+        gpu = self.engine_gpu.isChecked()
+        # If the codec currently checked has no usable encoder under the engine we
+        # just switched to, hop to whichever codec does -- never leave the panel
+        # pointed at a combination available_encoders() never proved works.
+        if self.codec_hevc.isChecked() and (gpu, "hevc") not in self._groups:
+            self.codec_h264.setChecked(True)
+        elif self.codec_h264.isChecked() and (gpu, "h264") not in self._groups \
+                and (gpu, "hevc") in self._groups:
+            self.codec_hevc.setChecked(True)
+        self._apply_output_control_states()
+        self._on_codec_changed()
+
+    def _on_codec_changed(self) -> None:
         self.preset_combo.clear()
-        name = self.encoder_combo.currentData()
-        spec = next((s for s in getattr(self, "_specs", []) if s.name == name), None)
+        spec = self._current_spec()
         if spec is None:
             return
-        self.preset_combo.addItems(list(spec.presets))
-        self.preset_combo.setCurrentText(spec.default_preset)
+        for name in spec.presets:
+            label = f"{tr(f'preset.{name}')} ({name})"
+            if name == spec.default_preset:
+                label = tr("out.preset.recommended", name=label)
+            self.preset_combo.addItem(label, name)
+        i = self.preset_combo.findData(spec.default_preset)
+        self.preset_combo.setCurrentIndex(i if i >= 0 else 0)
+        self._recompute()
 
     def _selected_kinds(self) -> list[str]:
         return [k for k, cb in self._kind_boxes.items() if cb.isChecked()]
@@ -743,8 +858,19 @@ class MainWindow(QMainWindow):
         content = total_duration_s(self._segments)
         n_events = sum(1 for e in self._media.events if e.kind in kinds)
         if self._segments:
-            # Measured on an RTX 3070: ~4.3x realtime re-encoding at p4, ~120x copying.
-            rate = 120.0 if self.mode_copy.isChecked() else 4.3
+            # Rough realtime multipliers for the ETA, not a guarantee: ~120x for
+            # stream copy, ~4.3x for GPU re-encode (measured on an RTX 3070 at p4),
+            # ~1.0x for libx264 on the CPU (Outplayed's own baseline) and roughly
+            # half that again for libx265, which is markedly slower per frame.
+            spec = self._current_spec()
+            if self.mode_copy.isChecked():
+                rate = 120.0
+            elif spec is None or spec.hardware:
+                rate = 4.3
+            elif spec.codec == "hevc":
+                rate = 0.5
+            else:
+                rate = 1.0
             self.summary.setText(tr(
                 "summary", events=n_events, segments=len(self._segments),
                 length=fmt_duration(content), eta=content / rate))
@@ -766,16 +892,15 @@ class MainWindow(QMainWindow):
         if not out.name:
             QMessageBox.warning(self, tr("err.output.title"), tr("err.output.body"))
             return
-        spec = next((s for s in self._specs
-                     if s.name == self.encoder_combo.currentData()), None)
+        spec = self._current_spec()
         if spec is None:
             QMessageBox.critical(self, tr("err.encoder.title"), tr("err.encoder.body"))
             return
 
         options = RenderOptions(
             encoder=spec,
-            preset=self.preset_combo.currentText() or spec.default_preset,
-            quality=self.quality_spin.value(),
+            preset=self.preset_combo.currentData() or spec.default_preset,
+            quality=self.quality_combo.currentData() or DEFAULT_QUALITY,
             audio=self.audio_combo.currentData() or "0",
             mode="copy" if self.mode_copy.isChecked() else "encode",
         )

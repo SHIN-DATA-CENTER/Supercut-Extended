@@ -74,7 +74,11 @@ def render(size: int) -> QPixmap:
 
 
 def png_bytes(px: QPixmap) -> bytes:
-    buf = QBuffer(QByteArray())
+    # QBuffer only stores a *pointer* to the QByteArray it wraps, so the array must be
+    # kept alive in a named variable -- an inline QByteArray() temporary gets garbage
+    # collected while still referenced, corrupting the heap.
+    data = QByteArray()
+    buf = QBuffer(data)
     buf.open(QBuffer.WriteOnly)
     px.save(buf, "PNG")
     return bytes(buf.data())

@@ -51,14 +51,18 @@ Outplayed は録画も手動エクスポートも既に GPU を使っている�
 | `SupercutExtended.exe` | GUI 本体 |
 | `SupercutExtended-cli.exe` | コマンドライン版（`... list` など） |
 
-**ffmpeg は同梱していない**（サイズと GPL 再配布の都合）。PATH に ffmpeg があればそのまま動く。
-別 PC に持っていく場合は `ffmpeg.exe` と `ffprobe.exe` を **exe と同じフォルダ**に置けば認識する
-（`ffmpeg\` や `bin\` サブフォルダでも可）。見つからない場合は起動時にその旨を表示する。
+**ffmpeg.exe / ffprobe.exe は exe と同じフォルダに同梱済み**（gyan.dev の
+`ffmpeg-8.1.2-essentials_build`、GPLv3。libx264/libx265/NVENC/AMD AMF/Intel QSV の
+H.264・HEVC が全部有効なビルドを選んでいる。詳細とライセンス上の注意点は
+`vendor/ffmpeg/NOTICE.txt` 参照）。別 PC に持っていく場合もフォルダごとコピーすれば
+そのまま動く。同梱の ffmpeg が見つからない場合は PATH、次に `SUPERCUT_FFMPEG` 環境変数
+にフォールバックする。
 
 自分でビルドし直す場合:
 
 ```bash
-pip install pyinstaller
+pip install -r requirements.txt
+python tools/fetch_ffmpeg.py             # vendor/ffmpeg/ に ffmpeg.exe 等を取得（初回のみ）
 python -m PyInstaller supercut.spec --noconfirm --clean
 ```
 
@@ -269,5 +273,6 @@ python tools/test_gui_render.py            # GUI のスレッド配線を検証
 ## 必要環境
 
 - Windows / Python 3.11+
-- **ffmpeg**（PATH 上。`SUPERCUT_FFMPEG` で上書き可）
-- NVIDIA / AMD / Intel いずれかの GPU。無ければ libx264 に自動フォールバック
+- **ffmpeg**（exe 版は同梱済み。ソースから動かす場合は PATH 上に置くか
+  `SUPERCUT_FFMPEG` / `SUPERCUT_FFPROBE` で上書き）
+- NVIDIA / AMD / Intel いずれかの GPU。無ければ libx264/libx265 に自動フォールバック
