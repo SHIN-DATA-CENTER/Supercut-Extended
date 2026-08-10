@@ -72,9 +72,9 @@ def render(size: int) -> QPixmap:
 
 
 def png_bytes(px: QPixmap) -> bytes:
-    # The QByteArray must stay referenced from Python: QBuffer only holds a pointer to
-    # it, so passing a temporary (`QBuffer(QByteArray())`) segfaults once the temporary
-    # is collected out from under the buffer.
+    # QBuffer only stores a *pointer* to the QByteArray it wraps, so the array has to
+    # stay referenced from Python: passing a temporary (`QBuffer(QByteArray())`) lets
+    # it be collected out from under the buffer, which segfaults.
     store = QByteArray()
     buf = QBuffer(store)
     buf.open(QBuffer.WriteOnly)

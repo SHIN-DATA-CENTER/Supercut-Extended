@@ -4,6 +4,10 @@ requirements.txt
 cooliocns SVG/
 assets/
 
+# Vendored ffmpeg binaries (fetched via tools/fetch_ffmpeg.py, GPLv3, ~200MB)
+vendor/ffmpeg/*.exe
+vendor/ffmpeg/*.zip
+
 HANDOFF.md
 
 # Byte-compiled / optimized / DLL files

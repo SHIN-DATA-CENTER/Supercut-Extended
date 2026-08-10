@@ -26,22 +26,41 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _search_roots() -> list[Path]:
+    """Directories that may hold a bundled ffmpeg, most specific first.
+
+    ``_MEIPASS`` has to come first and must not be confused with ``app_dir()``: in a
+    one-file build the bundled binaries are unpacked into a temporary directory, while
+    ``sys.executable`` is the .exe the user double-clicked. Looking only next to the
+    executable would silently miss our own ffmpeg and fall through to PATH -- which on
+    a machine without ffmpeg installed means the app fails despite shipping it.
+    """
+    roots: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass))
+    roots.append(app_dir())
+    if not getattr(sys, "frozen", False):
+        # Running from source: use whatever tools/fetch_ffmpeg.py downloaded.
+        roots.append(Path(__file__).resolve().parent.parent / "vendor" / "ffmpeg")
+    return roots
+
+
 def _find_tool(name: str, env_var: str) -> str:
     """Locate ffmpeg/ffprobe.
 
-    Checked in order: explicit override, then alongside the executable (so the exe can
-    be made portable by dropping the binaries next to it), then PATH.
+    Checked in order: explicit override, then the binaries we ship, then PATH.
     """
     override = os.environ.get(env_var)
     if override and Path(override).exists():
         return override
 
     exe_name = f"{name}.exe" if os.name == "nt" else name
-    base = app_dir()
-    for candidate in (base / exe_name, base / "ffmpeg" / exe_name,
-                      base / "bin" / exe_name):
-        if candidate.exists():
-            return str(candidate)
+    for base in _search_roots():
+        for candidate in (base / exe_name, base / "ffmpeg" / exe_name,
+                          base / "bin" / exe_name):
+            if candidate.exists():
+                return str(candidate)
 
     found = shutil.which(name)
     if found:
