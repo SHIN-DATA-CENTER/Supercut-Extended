@@ -13,10 +13,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "app.title": "Supercut Extended",
         "search.placeholder": "ゲーム名・マップで絞り込み...",
 
+        "col.pick": "",
         "col.when": "日時",
         "col.game": "ゲーム",
         "col.length": "長さ",
         "col.highlights": "ハイライト",
+
+        "sel.all": "全選択",
+        "sel.clear": "解除",
+        "sel.count": "{n} 件を選択中",
+        "sel.none": "チェックした試合をまとめて出力します",
+        "sel.tip": "チェックした試合がまとめて出力されます。\n"
+                   "チェックが無いときは、表示中の試合だけを出力します。",
 
         "select.match": "試合を選択してください",
         "loading": "Outplayed のライブラリを読み込み中...",
@@ -50,7 +58,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "out.quality": "画質",
         "out.audio": "音声",
         "out.file": "保存先",
+        "out.dir": "保存先フォルダ",
         "out.browse": "参照...",
+
+        "out.shape": "複数選択したとき",
+        "out.shape.combine": "1本にまとめる",
+        "out.shape.combine.desc": "選んだ試合を時系列につないで 1 ファイルにする",
+        "out.shape.separate": "試合ごとに別ファイル",
+        "out.shape.separate.desc": "試合ごとに 1 ファイルずつ書き出す",
 
         "audio.all": "全トラックを残す",
         "audio.mix": "全トラックをミックス",
@@ -62,11 +77,13 @@ STRINGS: dict[str, dict[str, str]] = {
 
         "summary.none": "イベントが選択されていません",
         "summary": "{events} 件のイベント → {segments} セグメント / {length}   ·   予想 {eta:.0f} 秒",
+        "summary.multi": "{matches} 試合 · {events} 件のイベント → {segments} セグメント / {length}   ·   予想 {eta:.0f} 秒",
 
         "status.building": "作成中...",
         "status.cancelling": "キャンセルしています...",
         "status.cancelled": "キャンセルしました",
         "status.done": "{name} を {secs:.1f} 秒で作成しました（{speed:.1f}倍速 / {mb:.0f} MB）",
+        "status.done.multi": "{n} 本を {secs:.1f} 秒で作成しました（合計 {mb:.0f} MB）",
         "status.probe_fail": "動画を読み込めません: {err}",
         "status.load_fail": "試合の読み込みに失敗しました: {err}",
 
@@ -77,6 +94,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "err.encoder.body": "使用可能なエンコーダがありません。",
         "err.output.title": "保存先",
         "err.output.body": "先に保存先を指定してください。",
+        "err.output.dir": "先に保存先フォルダを指定してください。",
+        "err.noevents.title": "対象がありません",
+        "err.noevents.body": "選択した試合には、指定した種類のイベントがありません。",
         "warn.cpu": "GPU エンコーダが見つかりません。CPU にフォールバックします",
         "encoder.missing": "ffmpeg が見つかりません",
 
@@ -106,10 +126,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "app.title": "Supercut Extended",
         "search.placeholder": "Filter by game or map...",
 
+        "col.pick": "",
         "col.when": "When",
         "col.game": "Game",
         "col.length": "Length",
         "col.highlights": "Highlights",
+
+        "sel.all": "Select all",
+        "sel.clear": "Clear",
+        "sel.count": "{n} selected",
+        "sel.none": "Tick matches to build them together",
+        "sel.tip": "Ticked matches are built together.\n"
+                   "With nothing ticked, only the match being previewed is built.",
 
         "select.match": "Select a match",
         "loading": "Loading Outplayed library...",
@@ -143,7 +171,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "out.quality": "Quality",
         "out.audio": "Audio",
         "out.file": "File",
+        "out.dir": "Folder",
         "out.browse": "Browse...",
+
+        "out.shape": "When several are selected",
+        "out.shape.combine": "Combine into one file",
+        "out.shape.combine.desc": "Join the selected matches in chronological order",
+        "out.shape.separate": "One file per match",
+        "out.shape.separate.desc": "Write a separate supercut for each match",
 
         "audio.all": "All tracks (keep separate)",
         "audio.mix": "Mix all tracks",
@@ -155,11 +190,13 @@ STRINGS: dict[str, dict[str, str]] = {
 
         "summary.none": "No events selected",
         "summary": "{events} events → {segments} segments / {length}   ·   about {eta:.0f}s",
+        "summary.multi": "{matches} matches · {events} events → {segments} segments / {length}   ·   about {eta:.0f}s",
 
         "status.building": "Building...",
         "status.cancelling": "Cancelling...",
         "status.cancelled": "Render cancelled",
         "status.done": "Built {name} in {secs:.1f}s ({speed:.1f}x realtime, {mb:.0f} MB)",
+        "status.done.multi": "Built {n} files in {secs:.1f}s ({mb:.0f} MB total)",
         "status.probe_fail": "cannot probe media: {err}",
         "status.load_fail": "failed to load match: {err}",
 
@@ -170,6 +207,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "err.encoder.body": "No usable encoder available.",
         "err.output.title": "Output",
         "err.output.body": "Choose an output file first.",
+        "err.output.dir": "Choose an output folder first.",
+        "err.noevents.title": "Nothing to build",
+        "err.noevents.body": "The selected matches have none of the chosen event kinds.",
         "warn.cpu": "No GPU encoder available - falling back to CPU",
         "encoder.missing": "ffmpeg not found",
 
@@ -219,8 +259,19 @@ def language() -> str:
 
 
 def tr(key: str, **kwargs) -> str:
+    """Look the key up, falling back to English and finally to the key itself.
+
+    Membership rather than truthiness: a deliberately empty string (the tick column's
+    header, say) is a real translation, and `table.get(key) or ...` would fall through
+    it and display the raw key.
+    """
     table = STRINGS.get(_LANG) or STRINGS["en"]
-    text = table.get(key) or STRINGS["en"].get(key) or key
+    if key in table:
+        text = table[key]
+    elif key in STRINGS["en"]:
+        text = STRINGS["en"][key]
+    else:
+        text = key
     return text.format(**kwargs) if kwargs else text
 
 

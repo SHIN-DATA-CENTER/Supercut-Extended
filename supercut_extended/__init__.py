@@ -5,4 +5,4 @@ This package reuses Outplayed's own event data and cut list, and puts the encode
 the GPU instead.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

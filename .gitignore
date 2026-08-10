@@ -2,6 +2,9 @@ requirements.txt
 
 # Icons Folder
 cooliocns SVG/
+assets/
+
+HANDOFF.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -221,3 +224,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Supercut Extended
+# Render output written by tools/test_gui_render.py
+gui_worker_test.mp4

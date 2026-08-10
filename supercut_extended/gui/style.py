@@ -73,6 +73,14 @@ QTableWidget {{ background: {SURFACE}; border: 1px solid {BORDER_SOFT};
     border-radius: 10px; gridline-color: transparent; outline: none; }}
 QTableWidget::item {{ padding: 7px 6px; border: 0; }}
 QTableWidget::item:selected {{ background: {ACCENT}; color: #ffffff; }}
+/* The tick column. A checkable item is drawn by the view, not by a QCheckBox, so the
+   QCheckBox::indicator rules below do not reach it -- without these it falls back to
+   the native Windows check box and looks nothing like the rest of the app. */
+QTableWidget::indicator {{ width: 20px; height: 20px; border: 0;
+    background: transparent; }}
+QTableWidget::indicator:unchecked {{ {check_off} }}
+QTableWidget::indicator:unchecked:hover {{ {check_off_hover} }}
+QTableWidget::indicator:checked {{ {check_on} }}
 QHeaderView::section {{ background: transparent; color: {TEXT_DIM}; border: 0;
     border-bottom: 1px solid {BORDER}; padding: 8px 6px; font-weight: 700;
     font-size: 11px; }}

@@ -31,18 +31,27 @@ ICON_DIR_NAME = "cooliocns SVG"
 SUPERSAMPLE = 3
 
 
-def icon_root() -> Path:
-    """Locate the icon set in both source checkouts and the PyInstaller bundle."""
+def _bundle_candidates(relative: str) -> list[Path]:
+    """Every place a bundled data file may live, most specific first.
+
+    Covers the PyInstaller one-file extraction dir, the folder next to a frozen exe,
+    the source checkout, and finally the working directory.
+    """
     candidates = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates.append(Path(meipass) / ICON_DIR_NAME)
+        candidates.append(Path(meipass) / relative)
     if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).parent / ICON_DIR_NAME)
+        candidates.append(Path(sys.executable).parent / relative)
     here = Path(__file__).resolve()
-    candidates.append(here.parent.parent.parent / ICON_DIR_NAME)
-    candidates.append(Path.cwd() / ICON_DIR_NAME)
+    candidates.append(here.parent.parent.parent / relative)
+    candidates.append(Path.cwd() / relative)
+    return candidates
 
+
+def icon_root() -> Path:
+    """Locate the icon set in both source checkouts and the PyInstaller bundle."""
+    candidates = _bundle_candidates(ICON_DIR_NAME)
     for c in candidates:
         if c.is_dir():
             return c
@@ -120,3 +129,25 @@ def css_icon(name: str, color: str = "#e6edf6", size: int = 20) -> str:
 def available() -> bool:
     """True when the icon set was found -- callers fall back to text if not."""
     return icon_root().is_dir()
+
+
+APP_ICON_NAME = "app.ico"
+APP_GLYPH = "Edit/Layers"
+APP_GLYPH_COLOR = "#60a5fa"
+
+
+@lru_cache(maxsize=1)
+def app_icon() -> QIcon:
+    """The window/taskbar icon, matching the icon compiled into the executable.
+
+    Windows shows the .ico from the exe in Explorer but the *window* icon on the
+    taskbar button, so loading the same file for both stops the icon changing the
+    moment the app launches. A source checkout that has not run tools/make_icon.py
+    yet has no .ico, so fall back to the bare glyph rather than showing nothing.
+    """
+    for candidate in _bundle_candidates(f"assets/{APP_ICON_NAME}"):
+        if candidate.is_file():
+            ico = QIcon(str(candidate))
+            if not ico.isNull():
+                return ico
+    return icon(APP_GLYPH, APP_GLYPH_COLOR, 64)
