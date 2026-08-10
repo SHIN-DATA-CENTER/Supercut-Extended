@@ -1,11 +1,11 @@
-# Supercut Extended  v1.0.0
+# Supercut Extended
 
 Outplayed の Supercut を **GPU (NVENC)** で作り直す外部ツール。
 イベント検出と録画は Outplayed のものをそのまま使い、**結合・エンコードの工程だけを置き換える**。
 
 ---
 
-## なぜ作ったか
+## 背景
 
 Outplayed は録画も手動エクスポートも既に GPU を使っているのに、**Supercut だけが CPU の libx264**
 で処理している。`ffprobe` の `TAG:encoder` で経路ごとに確認した結果:
@@ -44,19 +44,23 @@ Outplayed は録画も手動エクスポートも既に GPU を使っている�
 
 ### exe 版（ビルド済み）
 
-`dist\SupercutExtended\` の中の **`SupercutExtended.exe`** を起動するだけ。
+**`SupercutExtended.exe`** を起動するだけ。
+※前提としてOutPlayedを利用していること。
 
-| ファイル | 用途 |
-|---|---|
-| `SupercutExtended.exe` | GUI 本体 |
-| `SupercutExtended-cli.exe` | コマンドライン版（`... list` など） |
+| ファイル | 大きさ | 用途 |
+|---|---|---|
+| `SupercutExtended.exe` | 114 MB | GUI 本体 |
+| `SupercutExtended-cli.exe` | 114 MB | コマンドライン版（`... list` など） |
 
-**ffmpeg.exe / ffprobe.exe は exe と同じフォルダに同梱済み**（gyan.dev の
-`ffmpeg-8.1.2-essentials_build`、GPLv3。libx264/libx265/NVENC/AMD AMF/Intel QSV の
-H.264・HEVC が全部有効なビルドを選んでいる。詳細とライセンス上の注意点は
-`vendor/ffmpeg/NOTICE.txt` 参照）。別 PC に持っていく場合もフォルダごとコピーすれば
-そのまま動く。同梱の ffmpeg が見つからない場合は PATH、次に `SUPERCUT_FFMPEG` 環境変数
-にフォールバックする。
+**それぞれ 1 ファイルで完結している。** Python も PySide6 も、**ffmpeg 本体も** exe の中に
+入っているので、インストールも、隣に置くフォルダも要らない。どこにコピーしても単体で動く。
+2 つは独立しているので、GUI しか使わないなら `SupercutExtended.exe` だけ持っていけばよい。
+
+同梱している ffmpeg は gyan.dev の `ffmpeg-8.1.2-essentials_build`（**GPLv3**）。
+libx264 / libx265 / NVENC / AMD AMF / Intel QSV の H.264・HEVC が全部有効な、
+公式 Windows ビルドで唯一の組み合わせを選んでいる。再配布上の注意点は
+[`vendor/ffmpeg/NOTICE.txt`](vendor/ffmpeg/NOTICE.txt) を参照。
+同梱の ffmpeg が使えない場合は PATH、次に `SUPERCUT_FFMPEG` 環境変数にフォールバックする。
 
 自分でビルドし直す場合:
 
@@ -65,6 +69,31 @@ pip install -r requirements.txt
 python tools/fetch_ffmpeg.py             # vendor/ffmpeg/ に ffmpeg.exe 等を取得（初回のみ）
 python -m PyInstaller supercut.spec --noconfirm --clean
 ```
+
+#### 単体 exe とフォルダ配布の切り替え
+
+`supercut.spec` 冒頭の `ONEFILE` で出力の形を切り替えられる。
+
+| 設定 | 出力 | 起動（GUI が出るまで） |
+|---|---|---|
+| `ONEFILE = True`（既定） | exe 2 本（各 114 MB） | **約 10.4 秒** |
+| `ONEFILE = False` | フォルダ 306 MB（ffmpeg は 1 部だけ） | **約 2.5 秒** |
+
+単体 exe は起動のたびに中身を `%TEMP%` に展開するため、同梱した ffmpeg（204 MB）が
+そのまま起動時間に乗る。フォルダ配布は展開が無いので同梱しても起動時間は変わらない
+（初回だけディスクから読むぶん遅く、実測 7.8 秒 → 2 回目以降 2.4 秒）。
+また単体 exe は 2 本が別々に ffmpeg を抱えるので、合計サイズでは不利になる。
+持ち運びやすさを取るか起動の速さを取るかで選ぶ。
+
+exe に埋め込むアイコン `assets/` は**リポジトリに含めていない**（`cooliocns SVG/` と同じ扱い）。
+`supercut.spec` が `assets/app.ico` を参照するので、**クローン直後は先にアイコンを生成する**:
+
+```bash
+python tools/make_icon.py     # assets/app.ico を生成（同梱のアイコンセットから描く）
+```
+
+これを飛ばすとビルドがアイコン不在で止まる。生成後はデザインを変えたときだけ再実行すればよい。
+なお `.ico` が無くてもアプリ自体は動く（ウィンドウアイコンはグリフにフォールバックする）。
 
 ### ソースから動かす
 
@@ -85,6 +114,17 @@ python supercut.py            # GUI
   **書き出す前にカット位置を確認できる**
 - 表示メニューから日本語 / English を切り替え（次回起動時に反映）
 
+#### 複数の試合をまとめて出力する（v1.0.1〜）
+
+一覧の左端のチェック欄で複数の試合を選べる。**チェックが 1 つも無いときは、
+プレビュー中の試合だけが対象**になるので、1 試合だけ作るときの操作は今までと変わらない。
+
+- チェックは**検索で絞り込んでも保持される**（`全選択` / `解除` は表示中の行だけに効く）
+- 2 件以上チェックすると「複数選択したとき」のラジオが有効になる
+  - **1本にまとめる** — 選んだ試合を**時系列順**につないで 1 ファイルにする
+  - **試合ごとに別ファイル** — 試合ごとに 1 ファイルずつ書き出す。保存先はフォルダ指定に変わる
+- チェックした行を切り替えてもプレビューは別扱いなので、**選択を崩さずに各試合を見て回れる**
+
 CLI も同じ core を使う:
 
 ```bash
@@ -93,8 +133,13 @@ python supercut.py events 1                      # イベント詳細
 python supercut.py build 1 --events kill --dry-run
 python supercut.py build 1 --events kill,ace --pre 8 --post 1
 python supercut.py build 1 --events kill --mode copy
+python supercut.py build 3 5 8 --events kill     # 3 試合を 1 本にまとめる
+python supercut.py build 3 5 8 --separate        # 試合ごとに 1 本ずつ
 python supercut.py encoders                      # 使えるエンコーダを実測
 ```
+
+`build` の番号は `list` の行番号だが、**録画が増えると行番号はずれる**。
+確実に指定したいときは試合 ID の先頭数文字を渡す（`build 6677164a` など）。
 
 ### 主なオプション
 
@@ -105,6 +150,7 @@ python supercut.py encoders                      # 使えるエンコーダを�
 | `--gap` | この秒数以内に近接したセグメントも結合する |
 | `--mode` | `encode`（既定 / Outplayed 同等）または `copy`（無劣化・高速） |
 | `--audio` | トラック番号 / `all` / `mix` / `none` |
+| `--separate` | 複数指定したとき、1本にまとめず**試合ごとに**書き出す |
 | `--quality` | CQ 値。小さいほど高画質（既定 23） |
 
 ---
@@ -182,15 +228,19 @@ supercut_extended/
 ├─ probe.py      # ffprobe（実尺・解像度・音声トラック）
 ├─ encoder.py    # エンコーダの実機プローブ + 引数組み立て
 ├─ render.py     # 2 段レンダリング（NVENC 切り出し → 無劣化連結）
+├─ updater.py    # GitHub Releases 経由の更新確認・自己更新
+├─ winio.py      # ロック中ファイルの共有読み取り（Win32 CreateFileW）
 ├─ cli.py
 └─ gui/
-   ├─ main_window.py  # 試合一覧・設定・進捗
-   ├─ player.py       # QMediaPlayer プレビュー
-   ├─ timeline.py     # イベント表示兼シークバー
-   ├─ icons.py        # coolicons SVG の読み込み・色置換・キャッシュ
-   ├─ style.py        # パレットとスタイルシート
-   └─ i18n.py         # 日本語 / English
+   ├─ main_window.py   # 試合一覧・設定・進捗
+   ├─ player.py        # QMediaPlayer プレビュー
+   ├─ timeline.py      # イベント表示兼シークバー
+   ├─ icons.py         # coolicons SVG の読み込み・色置換・キャッシュ
+   ├─ style.py         # パレットとスタイルシート
+   ├─ i18n.py          # 日本語 / English
+   └─ update_dialog.py # 更新ダイアログ
 cooliocns SVG/   # アイコンセット（exe にも同梱される）
+assets/app.ico   # exe・ウィンドウ・タスクバー用アイコン（tools/make_icon.py が生成）
 tools/           # 調査・検証・ベンチマーク用スクリプト
 ```
 
@@ -199,21 +249,24 @@ tools/           # 調査・検証・ベンチマーク用スクリプト
 起動時に GitHub の最新リリースを確認し、新しければダイアログを出す。
 `ヘルプ → アップデートを確認` で手動確認も可能。
 
-**公開前にリポジトリ名の設定が必要:**
+確認先のリポジトリは `supercut_extended/updater.py` の `GITHUB_REPO` で設定している。
 
 ```python
 # supercut_extended/updater.py
-GITHUB_REPO = "オーナー名/リポジトリ名"      # 例: "Comugi/supercut-extended"
+GITHUB_REPO = "SHIN-DATA-CENTER/Supercut-Extended"
 ```
 
 環境変数 `SUPERCUT_GITHUB_REPO` でも上書きできる（フォークでの検証用）。
-未設定の間はアップデート確認そのものを無効化しているので、404 を叩き続けることはない。
+空文字にするとアップデート確認そのものを無効化する（404 を叩き続けないため）。
+リリースがまだ 1 つも無い間は API が 404 を返すが、その場合も静かに無視して起動する。
 
 **リリースの作り方**
 
 1. タグを `v1.0.1` のように付ける（先頭の `v` は有無どちらでも可）
-2. `dist\SupercutExtended` フォルダを zip にして**リリースの添付ファイル**に加える
-3. リリースノートはそのままアプリ内にマークダウンで表示される
+2. `dist\` の中の exe を zip にして**リリースの添付ファイル**に加える
+   （zip の直下でも 1 階層下でもよい。`SupercutExtended.exe` を探して見つける）
+3. リリースノートはそのままアプリ内にマークダウンで表示される。
+   [CHANGELOG.md](CHANGELOG.md) の該当バージョンの節をそのまま貼れる形にしてある
 
 zip が添付されていれば、アプリ内の「更新する」でダウンロード → 展開 → 再起動まで自動で行う。
 Windows は実行中の exe を上書きできないため、**アプリ終了を待ってからファイルを差し替える
@@ -241,6 +294,18 @@ UI のアイコンは同梱の **coolicons** SVG セットを使用している�
 PNG を一時フォルダに書き出してそのパスを返している。Qt のスタイルシートはバックスラッシュを
 エスケープ文字として扱うので、パスは必ずスラッシュ区切りで渡している。
 
+**アプリ自体のアイコン**（exe・ウィンドウ・タスクバー）は `assets/app.ico`。
+`tools/make_icon.py` が上と同じ「Edit/Layers」グリフを 16〜256px の 9 サイズで描き、
+1 つの .ico にまとめている（PyInstaller は SVG を受け取れないため）。
+
+- グリフの背後に**角丸のプレートを敷いている**。アプリ内では暗いクロームの上に線だけで
+  置いても見えるが、Explorer の白背景に 16px で置くと細い青線はほぼ消えるため
+- Windows は Explorer では **exe に埋め込まれた** アイコンを、タスクバーでは
+  **ウィンドウ**のアイコンを見る。別々にすると起動した瞬間にアイコンが変わるので、
+  `icons.app_icon()` が同じ .ico を読んで `setWindowIcon()` に渡している
+- ソースから動かすと Windows は python.exe としてグループ化してしまうので、
+  起動時に `SetCurrentProcessExplicitAppUserModelID` で独自の AppUserModelID を宣言している
+
 ### 設計上の要点
 
 - **エンコーダは一覧ではなく実測で判定する。** RTX 3070 は `ffmpeg -encoders` に
@@ -258,6 +323,21 @@ PNG を一時フォルダに書き出してそのパスを返している。Qt �
 - **GUI のシグナルは `Qt.QueuedConnection` で繋ぐ。** `render()` は
   `ThreadPoolExecutor` から進捗を emit するので、明示的にキューしないと
   GUI スレッド外でウィジェットを触ることになる
+- **1本にまとめられるのは、ストリームの形が揃っている録画だけ。** 2段目の連結は
+  concat デマクサなので、パーツのストリームが違うと繋げない。`encode` はコーデックと
+  （単一トラック選択時の）音声は揃えるが、**解像度と fps はソースのまま**で、`copy` は
+  何も揃えない。そこで `_stream_shape()` が**エンコード前に**照合し、食い違う場合は
+  どのファイルがどう違うかを挙げて中断する（長時間エンコードした後に concat で
+  失敗するのを避けるため）
+- **チェック状態は match_id で持つ。** 行番号で持つと検索で絞り込んだ瞬間にずれる。
+  また `_refresh_match_table` は `itemChanged` を大量に出すので、`_populating`
+  フラグで自分の再描画とユーザー操作を区別している
+- **ラジオは両方の `toggled` に繋いで、ON 側だけで処理する。** Qt は先に旧ラジオを
+  OFF にしてから新ラジオを ON にするため、片方だけに繋ぐと「どちらも OFF」の瞬間に
+  走って古い状態を読んでしまう
+- **テーブルのチェック印は `QTableWidget::indicator` で指定する。** アイテムのチェックは
+  QCheckBox ではなくビューが描くので、`QCheckBox::indicator` の指定は届かず、
+  Windows 標準の見た目のまま浮いてしまう
 
 ---
 

@@ -8,6 +8,8 @@ assets/
 vendor/ffmpeg/*.exe
 vendor/ffmpeg/*.zip
 
+HANDOFF.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -226,3 +228,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Supercut Extended
+# Render output written by tools/test_gui_render.py
+gui_worker_test.mp4

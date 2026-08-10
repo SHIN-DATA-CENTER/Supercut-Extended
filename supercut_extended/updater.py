@@ -29,12 +29,11 @@ from typing import Callable
 from . import __version__
 
 # ---------------------------------------------------------------------------
-# Set this to the GitHub repository once the project is published, e.g.
-#     GITHUB_REPO = "Comugi/supercut-extended"
-# Until it is filled in the updater stays disabled rather than hammering a 404.
-# The environment variable wins, which is handy for testing against a fork.
+# The repository releases are published to. Clearing this string disables update
+# checking entirely rather than hammering a 404. The environment variable wins,
+# which is handy for testing against a fork.
 # ---------------------------------------------------------------------------
-GITHUB_REPO = ""
+GITHUB_REPO = "SHIN-DATA-CENTER/Supercut-Extended"
 
 API_TIMEOUT = 8
 USER_AGENT = f"SupercutExtended/{__version__}"
@@ -198,6 +197,10 @@ def apply_and_restart(payload: Path) -> None:
     Windows keeps the running exe locked, so the copy has to happen after we are
     gone. robocopy /E merges the new build over the old one; exit codes below 8 are
     success in robocopy's unusual scheme.
+
+    The wait loop watches this process's own PID, but a one-file build also has a
+    bootloader parent that holds the .exe open until slightly after we exit. Retrying
+    for a few seconds (/R /W) rides out that window instead of failing the update.
     """
     target = app_dir()
     script = Path(tempfile.gettempdir()) / "supercut_apply_update.bat"
@@ -214,7 +217,7 @@ def apply_and_restart(payload: Path) -> None:
         f'  "%SystemRoot%\\System32\\timeout.exe" /t 1 /nobreak >nul\r\n'
         f'  goto wait\r\n'
         f')\r\n'
-        f'robocopy "{payload}" "{target}" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS >nul\r\n'
+        f'robocopy "{payload}" "{target}" /E /IS /IT /R:10 /W:1 /NFL /NDL /NJH /NJS >nul\r\n'
         f'if errorlevel 8 (\r\n'
         f'  echo Update failed. & pause & exit /b 1\r\n'
         f')\r\n'

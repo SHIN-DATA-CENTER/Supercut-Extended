@@ -14,9 +14,9 @@ from pathlib import Path
 
 from .encoder import available_encoders, describe, pick_encoder
 from .library import LibraryError, matches_with_highlights, read_matches
-from .model import HIGHLIGHT_KINDS, Match
+from .model import HIGHLIGHT_KINDS, Match, Media
 from .probe import ProbeError, probe
-from .render import RenderOptions, render
+from .render import RenderJob, RenderOptions, render_each, render_many
 from .segments import build_segments, total_duration_s
 
 
@@ -104,60 +104,101 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def pick_media(match: Match, media_id: int | None) -> Media:
+    """The media a match should be cut from, honouring an explicit --media."""
+    medias = match.playable_medias
+    if media_id is not None:
+        medias = [m for m in medias if m.media_id == media_id]
+    if not medias:
+        raise SystemExit(f"no playable media with events for match {match.match_id}")
+    return medias[0]
+
+
+def resolve_matches(matches: list[Match], selectors: list[str]) -> list[Match]:
+    """Resolve every selector, drop duplicates, then order chronologically.
+
+    Chronological order is what makes a combined montage watchable, and it keeps the
+    result independent of the order the selectors happened to be typed in.
+    """
+    seen: set[str] = set()
+    chosen: list[Match] = []
+    for sel in selectors:
+        match = resolve_match(matches, sel)
+        if match.match_id not in seen:
+            seen.add(match.match_id)
+            chosen.append(match)
+    return sorted(chosen, key=lambda m: m.start_time_ms)
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     matches = filter_by_game(matches_with_highlights(read_matches(args.db)), args.game)
-    match = resolve_match(matches, args.match)
+    selected = resolve_matches(matches, args.match)
+    if args.media is not None and len(selected) > 1:
+        raise SystemExit("--media only makes sense with a single match")
 
-    medias = match.playable_medias
-    if args.media is not None:
-        medias = [m for m in medias if m.media_id == args.media]
-    if not medias:
-        raise SystemExit("no playable media with events for this match")
-    media = medias[0]
-    if len(medias) > 1:
-        print(f"note: match has {len(medias)} medias, using #{media.media_id} "
-              f"(--media to choose)")
+    kinds = ([k.strip() for k in args.events.split(",") if k.strip()]
+             if args.events else None)
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
 
-    kinds = [k.strip() for k in args.events.split(",") if k.strip()] if args.events else None
-    try:
-        info = probe(media.path)
-    except ProbeError as exc:
-        raise SystemExit(str(exc))
+    jobs: list[RenderJob] = []
+    skipped: list[str] = []
+    for match in selected:
+        media = pick_media(match, args.media)
+        if len(match.playable_medias) > 1 and len(selected) == 1:
+            print(f"note: match has {len(match.playable_medias)} medias, using "
+                  f"#{media.media_id} (--media to choose)")
+        try:
+            info = probe(media.path)
+        except ProbeError as exc:
+            raise SystemExit(str(exc))
 
-    segments = build_segments(
-        media.events,
-        kinds=kinds,
-        pre_ms=args.pre * 1000 if args.pre is not None else None,
-        post_ms=args.post * 1000 if args.post is not None else None,
-        duration_ms=info.duration_ms,
-        gap_ms=args.gap * 1000,
-    )
-    if not segments:
-        have = ", ".join(sorted(match.event_counts())) or "none"
-        raise SystemExit(f"no events matched {kinds}. This match has: {have}")
+        segments = build_segments(
+            media.events,
+            kinds=kinds,
+            pre_ms=args.pre * 1000 if args.pre is not None else None,
+            post_ms=args.post * 1000 if args.post is not None else None,
+            duration_ms=info.duration_ms,
+            gap_ms=args.gap * 1000,
+        )
+        if not segments:
+            skipped.append(f"{match.label()} (has: "
+                           f"{', '.join(sorted(match.event_counts())) or 'none'})")
+            continue
 
-    content_s = total_duration_s(segments)
-    print(f"{match.label()}")
-    print(f"  source   {media.path.name}")
-    print(f"           {info.width}x{info.height} {info.fps:.0f}fps "
-          f"{info.duration_s:.1f}s  {len(info.audio)} audio track(s)")
-    print(f"  events   {sum(1 for e in media.events if not kinds or e.kind in kinds)}"
-          f" -> {len(segments)} segments, {content_s:.1f}s of content")
+        n_events = sum(1 for e in media.events if not kinds or e.kind in kinds)
+        print(f"{match.label()}")
+        print(f"  source   {media.path.name}")
+        print(f"           {info.width}x{info.height} {info.fps:.0f}fps "
+              f"{info.duration_s:.1f}s  {len(info.audio)} audio track(s)")
+        print(f"  events   {n_events} -> {len(segments)} segments, "
+              f"{total_duration_s(segments):.1f}s of content")
 
+        if args.dry_run:
+            for i, s in enumerate(segments, 1):
+                print(f"    {i:>3}. {s.start_s:9.3f}s -> {s.end_ms / 1000:9.3f}s "
+                      f"({s.duration_s:6.2f}s)")
+
+        jobs.append(RenderJob(
+            source=media.path, segments=segments, label=match.label(),
+            output=(default_output_dir(media.path)
+                    / f"{media.path.stem}-supercut-{stamp}.mp4"),
+        ))
+
+    for note in skipped:
+        print(f"skipped: no events matched {kinds} in {note}")
+    if not jobs:
+        raise SystemExit(f"no events matched {kinds} in any selected match")
+
+    if len(jobs) > 1:
+        total = sum(j.content_s for j in jobs)
+        print(f"\n{len(jobs)} recordings -> "
+              f"{sum(len(j.segments) for j in jobs)} segments, {total:.1f}s total")
     if args.dry_run:
-        for i, s in enumerate(segments, 1):
-            print(f"    {i:>3}. {s.start_s:9.3f}s -> {s.end_ms / 1000:9.3f}s "
-                  f"({s.duration_s:6.2f}s)")
         return 0
 
     spec = pick_encoder(args.encoder)
     if not spec.hardware:
         print(f"  WARNING: falling back to {spec.name} (CPU) - no GPU encoder usable")
-
-    out = Path(args.output) if args.output else (
-        default_output_dir(media.path)
-        / f"{media.path.stem}-supercut-{datetime.now():%Y%m%d-%H%M%S}.mp4"
-    )
 
     opts = RenderOptions(
         encoder=spec, preset=args.preset or spec.default_preset,
@@ -169,7 +210,23 @@ def cmd_build(args: argparse.Namespace) -> int:
     else:
         print(f"  encoder  {spec.name} preset={opts.preset} cq={opts.quality} "
               f"audio={opts.audio} workers={opts.workers}")
-    print(f"  output   {out}\n")
+
+    if args.separate:
+        if args.output:
+            out_dir = Path(args.output)
+            for job in jobs:
+                job.output = out_dir / Path(job.output).name
+        print(f"  output   {len(jobs)} file(s), one per recording")
+        for job in jobs:
+            print(f"           {job.output}")
+    else:
+        combined = Path(args.output) if args.output else (
+            default_output_dir(Path(jobs[0].source))
+            / (f"{Path(jobs[0].source).stem}-supercut-{stamp}.mp4" if len(jobs) == 1
+               else f"supercut-{len(jobs)}-matches-{stamp}.mp4")
+        )
+        print(f"  output   {combined}")
+    print()
 
     last = [0.0]
 
@@ -182,12 +239,16 @@ def cmd_build(args: argparse.Namespace) -> int:
         sys.stdout.write(f"\r  [{bar:<34}] {frac * 100:5.1f}%  {msg[:44]:<44}")
         sys.stdout.flush()
 
-    result = render(media.path, segments, out, opts, progress=on_progress)
+    if args.separate:
+        results = render_each(jobs, opts, progress=on_progress)
+    else:
+        results = [render_many(jobs, combined, opts, progress=on_progress)]
     sys.stdout.write("\r" + " " * 100 + "\r")
 
-    print(f"  done in {result.elapsed_s:.1f}s  "
-          f"({result.speed_x:.1f}x realtime, {result.size_bytes / 1e6:.1f} MB)")
-    print(f"  {result.output}")
+    for result in results:
+        print(f"  done in {result.elapsed_s:.1f}s  "
+              f"({result.speed_x:.1f}x realtime, {result.size_bytes / 1e6:.1f} MB)")
+        print(f"  {result.output}")
     return 0
 
 
@@ -212,7 +273,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_events)
 
     p = sub.add_parser("build", help="render a supercut")
-    p.add_argument("match", help="row number from `list`, or a match id prefix")
+    p.add_argument("match", nargs="+",
+                   help="one or more row numbers from `list`, or match id prefixes. "
+                        "Several are combined into one file in chronological order "
+                        "unless --separate is given")
     p.add_argument("--game", help="same filter you passed to `list`")
     p.add_argument("--events", default="kill",
                    help="comma separated kinds, or empty for all (default: kill)")
@@ -230,7 +294,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=("encode", "copy"), default="encode",
                    help="encode = Outplayed-equivalent re-encode on GPU (default); "
                         "copy = no re-encode, near-instant, cuts snap to keyframes")
-    p.add_argument("--output", help="output file path")
+    p.add_argument("--separate", action="store_true",
+                   help="write one supercut per match instead of combining them")
+    p.add_argument("--output",
+                   help="output file, or with --separate the directory to write into")
     p.add_argument("--dry-run", action="store_true", help="print segments and stop")
     p.set_defaults(func=cmd_build)
 

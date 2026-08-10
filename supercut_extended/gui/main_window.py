@@ -11,6 +11,7 @@ import os
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -28,7 +29,8 @@ from ..encoder import EncoderSpec, available_encoders, group_by_engine, vendor_l
 from ..library import matches_with_highlights, read_matches
 from ..model import HIGHLIGHT_KINDS, Match, Media
 from ..probe import MediaInfo, probe
-from ..render import RenderOptions, RenderResult, render
+from ..render import (RenderError, RenderJob, RenderOptions, render_each,
+                      render_many)
 from ..segments import build_segments, total_duration_s
 from . import icons
 from .i18n import event_label, fmt_duration, language, set_language, tr
@@ -56,25 +58,68 @@ class LibraryLoader(QThread):
             self.failed.emit(str(exc))
 
 
+@dataclass
+class BatchPlan:
+    """Everything a render needs, resolved off the GUI thread.
+
+    Only the *parameters* are captured here, not the segments: turning events into
+    segments needs the real duration of every source, and probing a few dozen files
+    would block the UI. The worker does both.
+    """
+
+    items: list[tuple[Path, list, str]]      # source, events, label
+    kinds: list[str]
+    pre_ms: float | None
+    post_ms: float | None
+    gap_ms: float
+    options: RenderOptions
+    combine: bool
+    output: Path                             # a file when combining, else a folder
+
+
 class RenderWorker(QObject):
     progressed = Signal(float, str)
-    finished = Signal(object)
+    finished = Signal(object)                # list[RenderResult]
     failed = Signal(str)
 
-    def __init__(self, source: Path, segments, output: Path, options: RenderOptions):
+    def __init__(self, plan: BatchPlan):
         super().__init__()
-        self._args = (source, segments, output, options)
+        self._plan = plan
         self.cancel = threading.Event()
 
-    def run(self) -> None:
-        source, segments, output, options = self._args
-        try:
-            result = render(
-                source, segments, output, options,
-                progress=lambda f, m: self.progressed.emit(f, m),
-                cancel=self.cancel,
+    def _jobs(self) -> list[RenderJob]:
+        plan = self._plan
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        jobs: list[RenderJob] = []
+        for source, events, label in plan.items:
+            info = probe(source)
+            segments = build_segments(
+                events, kinds=plan.kinds,
+                pre_ms=plan.pre_ms, post_ms=plan.post_ms,
+                duration_ms=info.duration_ms, gap_ms=plan.gap_ms,
             )
-            self.finished.emit(result)
+            if not segments:
+                continue
+            jobs.append(RenderJob(
+                source=source, segments=segments, label=label,
+                output=plan.output / f"{source.stem}-supercut-{stamp}.mp4",
+            ))
+        return jobs
+
+    def run(self) -> None:
+        plan = self._plan
+        try:
+            jobs = self._jobs()
+            if not jobs:
+                raise RenderError(tr("err.noevents.body"))
+            emit = lambda f, m: self.progressed.emit(f, m)  # noqa: E731
+            if plan.combine:
+                results = [render_many(jobs, plan.output, plan.options,
+                                       progress=emit, cancel=self.cancel)]
+            else:
+                results = render_each(jobs, plan.options,
+                                      progress=emit, cancel=self.cancel)
+            self.finished.emit(results)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -156,7 +201,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(tr("app.title"))
         self.resize(1400, 900)
         self.setStyleSheet(build_style())
-        self.setWindowIcon(icons.icon("Edit/Layers", "#60a5fa", 64))
+        self.setWindowIcon(icons.app_icon())
 
         self._matches: list[Match] = []
         self._match: Match | None = None
@@ -167,6 +212,10 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: RenderWorker | None = None
         self._last_output: Path | None = None
+        # Ticked matches, kept by id so search filtering never loses a selection.
+        self._checked: set[str] = set()
+        self._populating = False
+        self._output_touched = False
 
         self._build_ui()
         self._restore_settings()
@@ -298,21 +347,45 @@ class MainWindow(QMainWindow):
         glass.move(9, 8)
         lay.addWidget(self.search)
 
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            [tr("col.when"), tr("col.game"), tr("col.length"), tr("col.highlights")])
+            [tr("col.pick"), tr("col.when"), tr("col.game"),
+             tr("col.length"), tr("col.highlights")])
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)
+        # Row selection still drives the preview; the tick column is what decides
+        # what gets built, so the two stay independent.
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed)
+        # 20px indicator plus the 6px item padding on each side.
+        self.table.setColumnWidth(0, 34)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
         hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._on_match_selected)
+        self.table.itemChanged.connect(self._on_item_changed)
         lay.addWidget(self.table, 1)
+
+        self.pick_label = QLabel(tr("sel.none"))
+        self.pick_label.setObjectName("fieldLabel")
+        self.pick_label.setToolTip(tr("sel.tip"))
+        # No fixed height: QPushButton carries 8px of vertical padding, and forcing a
+        # shorter box clips the text rather than tightening the button.
+        all_btn = QPushButton(tr("sel.all"))
+        all_btn.clicked.connect(lambda: self._set_all_checked(True))
+        none_btn = QPushButton(tr("sel.clear"))
+        none_btn.clicked.connect(lambda: self._set_all_checked(False))
+
+        prow = QHBoxLayout()
+        prow.setSpacing(6)
+        prow.addWidget(self.pick_label, 1)
+        prow.addWidget(all_btn)
+        prow.addWidget(none_btn)
+        lay.addLayout(prow)
         return box
 
     def _build_right(self) -> QWidget:
@@ -452,6 +525,9 @@ class MainWindow(QMainWindow):
 
         self.output_edit = QLineEdit()
         self.output_edit.setMinimumWidth(60)
+        # textEdited (not textChanged) fires only for real typing, so the app can keep
+        # proposing defaults until the user takes the field over.
+        self.output_edit.textEdited.connect(self._on_output_edited)
         browse = QPushButton(tr("out.browse"))
         browse.setIcon(icons.icon("File/Folder_Open", TEXT, 16))
         browse.setIconSize(QSize(16, 16))
@@ -469,6 +545,31 @@ class MainWindow(QMainWindow):
             self._field(tr("out.preset"), self.preset_combo),
             self._field(tr("out.quality"), self.quality_combo))
 
+        self.shape_combine = QRadioButton(tr("out.shape.combine"))
+        self.shape_combine.setChecked(True)
+        self.shape_separate = QRadioButton(tr("out.shape.separate"))
+        # No per-widget stylesheet: these are radios like the encode/copy pair above
+        # and take their look from the global sheet. checkbox_style() would give them
+        # the square check glyphs used by the per-event boxes.
+        #
+        # Both are connected, and only the rising edge acts. Qt unchecks the outgoing
+        # radio first, so reacting to that would run while neither is checked yet and
+        # read the old shape back.
+        for w in (self.shape_combine, self.shape_separate):
+            w.toggled.connect(self._on_shape_changed)
+            w.setEnabled(False)     # only meaningful once several are ticked
+
+        shape_block = block(
+            caption(tr("out.shape")),
+            self.shape_combine, self.shape_separate)
+
+        self.output_caption = QLabel(tr("out.file"))
+        self.output_caption.setObjectName("fieldLabel")
+        ocol = QVBoxLayout()
+        ocol.setSpacing(3)
+        ocol.addWidget(self.output_caption)
+        ocol.addLayout(orow)
+
         # Wider spacing than the 4-8px used inside each sub-block, so "mode",
         # "processing", "quality type" and the preset/quality row read as distinct
         # questions rather than one dense list of radio buttons.
@@ -479,7 +580,8 @@ class MainWindow(QMainWindow):
             codec_block,
             speed_quality_block,
             self._field(tr("out.audio"), self.audio_combo),
-            self._field(tr("out.file"), orow),
+            shape_block,
+            ocol,
             spacing=14))
 
         # --- action
@@ -631,6 +733,8 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geo)
         if s.value("mode", "encode") == "copy":
             self.mode_copy.setChecked(True)
+        if s.value("shape", "combine") == "separate":
+            self.shape_separate.setChecked(True)
         engine = s.value("engine")
         if engine == "gpu" and self.engine_gpu.isEnabled():
             self.engine_gpu.setChecked(True)
@@ -661,6 +765,7 @@ class MainWindow(QMainWindow):
         s = self.settings
         s.setValue("geometry", self.saveGeometry())
         s.setValue("mode", "copy" if self.mode_copy.isChecked() else "encode")
+        s.setValue("shape", "separate" if self.shape_separate.isChecked() else "combine")
         s.setValue("engine", "gpu" if self.engine_gpu.isChecked() else "cpu")
         s.setValue("codec", "hevc" if self.codec_hevc.isChecked() else "h264")
         s.setValue("preset", self.preset_combo.currentData() or "")
@@ -696,23 +801,97 @@ class MainWindow(QMainWindow):
 
     def _refresh_match_table(self) -> None:
         rows = self._visible_matches()
-        self.table.setRowCount(len(rows))
-        for i, m in enumerate(rows):
-            counts = m.event_counts()
-            highlights = sum(v for k, v in counts.items() if k in HIGHLIGHT_KINDS)
-            name = m.game_name
-            if m.info.get("map"):
-                name += f"  ·  {m.info['map']}"
-            tip = f"{m.label()}\n" + ", ".join(
-                f"{event_label(k)}: {v}" for k, v in sorted(counts.items()))
-            cells = [m.started_at.strftime("%m-%d %H:%M"), name,
-                     fmt_duration(m.duration_s), str(highlights)]
-            for c, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                item.setToolTip(tip)
-                if c == 3:
-                    item.setForeground(QColor("#4ade80" if highlights else "#5a6577"))
-                self.table.setItem(i, c, item)
+        # Repopulating fires itemChanged for every cell; ignore those so filtering the
+        # list never looks like the user ticking boxes.
+        self._populating = True
+        try:
+            self.table.setRowCount(len(rows))
+            for i, m in enumerate(rows):
+                counts = m.event_counts()
+                highlights = sum(v for k, v in counts.items() if k in HIGHLIGHT_KINDS)
+                name = m.game_name
+                if m.info.get("map"):
+                    name += f"  ·  {m.info['map']}"
+                tip = f"{m.label()}\n" + ", ".join(
+                    f"{event_label(k)}: {v}" for k, v in sorted(counts.items()))
+
+                pick = QTableWidgetItem()
+                pick.setFlags((pick.flags() | Qt.ItemIsUserCheckable)
+                              & ~Qt.ItemIsSelectable)
+                pick.setCheckState(Qt.Checked if m.match_id in self._checked
+                                   else Qt.Unchecked)
+                pick.setToolTip(tr("sel.tip"))
+                self.table.setItem(i, 0, pick)
+
+                cells = [m.started_at.strftime("%m-%d %H:%M"), name,
+                         fmt_duration(m.duration_s), str(highlights)]
+                for c, text in enumerate(cells, start=1):
+                    item = QTableWidgetItem(text)
+                    item.setToolTip(tip)
+                    if c == 4:
+                        item.setForeground(
+                            QColor("#4ade80" if highlights else "#5a6577"))
+                    self.table.setItem(i, c, item)
+        finally:
+            self._populating = False
+        self._update_pick_label()
+
+    # -- multi-select -------------------------------------------------------
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._populating or item.column() != 0:
+            return
+        rows = self._visible_matches()
+        row = item.row()
+        if not (0 <= row < len(rows)):
+            return
+        match_id = rows[row].match_id
+        if item.checkState() == Qt.Checked:
+            self._checked.add(match_id)
+        else:
+            self._checked.discard(match_id)
+        self._update_pick_label()
+        self._rebuild_kind_boxes()
+        self._recompute()
+
+    def _set_all_checked(self, checked: bool) -> None:
+        """Apply to what the search currently shows, not the whole library."""
+        rows = self._visible_matches()
+        ids = {m.match_id for m in rows}
+        if checked:
+            self._checked |= ids
+        else:
+            self._checked -= ids
+        self._populating = True
+        try:
+            for i in range(self.table.rowCount()):
+                cell = self.table.item(i, 0)
+                if cell is not None:
+                    cell.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        finally:
+            self._populating = False
+        self._update_pick_label()
+        self._rebuild_kind_boxes()
+        self._recompute()
+
+    def _checked_matches(self) -> list[Match]:
+        """Ticked matches in chronological order, whether or not they are visible."""
+        return sorted((m for m in self._matches if m.match_id in self._checked),
+                      key=lambda m: m.start_time_ms)
+
+    def _target_matches(self) -> list[Match]:
+        """What Build will act on: the ticked matches, else the previewed one."""
+        chosen = self._checked_matches()
+        if chosen:
+            return chosen
+        return [self._match] if self._match else []
+
+    def _update_pick_label(self) -> None:
+        n = len(self._checked)
+        self.pick_label.setText(tr("sel.count", n=n) if n else tr("sel.none"))
+        multi = n > 1
+        for w in (self.shape_combine, self.shape_separate):
+            w.setEnabled(multi)
+        self._sync_output_field()
 
     # -- selection ----------------------------------------------------------
     def _on_match_selected(self) -> None:
@@ -740,33 +919,56 @@ class MainWindow(QMainWindow):
 
         self.player.load(media.path)
         try:
-            self._rebuild_kind_boxes(match)
+            self._rebuild_kind_boxes()
             self._rebuild_audio(self._info)
-            self.output_edit.setText(str(self._default_output(media.path)))
+            self._refresh_default_output()
             self._recompute()
         except Exception as exc:
             self.statusBar().showMessage(tr("status.load_fail", err=exc), 15000)
             raise
 
-    def _rebuild_kind_boxes(self, match: Match) -> None:
+    def _target_event_counts(self) -> dict[str, int]:
+        """Events per kind across everything Build will act on, not just the preview.
+
+        With several matches ticked the tallies have to add up over all of them --
+        counting only the previewed recording made the numbers disagree with what was
+        actually about to be rendered.
+        """
+        counts: dict[str, int] = {}
+        for match in self._target_matches():
+            media = match.playable_medias[0] if match.playable_medias else None
+            source = media.event_counts() if media else match.event_counts()
+            for kind, n in source.items():
+                counts[kind] = counts.get(kind, 0) + n
+        return counts
+
+    def _rebuild_kind_boxes(self) -> None:
+        # Ticking another match rebuilds these boxes, so the kinds already chosen have
+        # to be carried over or the selection would reset on every tick.
+        previous = {kind: cb.isChecked() for kind, cb in self._kind_boxes.items()}
         while self.kinds_layout.count():
             item = self.kinds_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._kind_boxes.clear()
 
-        counts = (self._media.event_counts() if self._media else {}) or match.event_counts()
+        counts = self._target_event_counts()
         for i, (kind, n) in enumerate(sorted(counts.items(), key=lambda kv: -kv[1])):
             cb = QCheckBox(f"{event_label(kind)}  ({n})")
-            cb.setChecked(kind in HIGHLIGHT_KINDS)
+            # setChecked before connecting, so restoring state does not fire _recompute
+            # once per box while the panel is still being rebuilt.
+            cb.setChecked(previous.get(kind, kind in HIGHLIGHT_KINDS))
             cb.toggled.connect(self._recompute)
             cb.setStyleSheet(checkbox_style(event_color(kind).name()))
             self.kinds_layout.addWidget(cb, i // 2, i % 2)
             self._kind_boxes[kind] = cb
 
+        # The legend labels the timeline, which only ever shows the previewed
+        # recording, so it stays tied to that rather than to the whole selection.
+        shown = (self._media.event_counts() if self._media else counts) or counts
         self.legend.setText("　".join(
             f"<span style='color:{event_color(k).name()}'>&#9632;</span> {event_label(k)}"
-            for k in counts))
+            for k in shown))
 
     def _rebuild_audio(self, info: MediaInfo) -> None:
         self.audio_combo.clear()
@@ -783,6 +985,30 @@ class MainWindow(QMainWindow):
         root = parents[2] if len(parents) >= 3 else source.parent
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         return root / "Exports" / f"{source.stem}-supercut-{stamp}.mp4"
+
+    def _refresh_default_output(self) -> None:
+        """Propose an output path, unless the user has typed one of their own.
+
+        With several matches ticked the name cannot follow a single recording, so a
+        combined montage gets its own name and separate output gets just the folder.
+        """
+        if self._output_touched:
+            return
+        targets = self._target_matches()
+        sources = [m.playable_medias[0].path for m in targets
+                   if m.playable_medias and m.playable_medias[0].path]
+        if not sources:
+            return
+
+        default = self._default_output(sources[0])
+        if self._writing_separate():
+            self.output_edit.setText(str(default.parent))
+        elif len(sources) > 1:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.output_edit.setText(str(
+                default.parent / f"supercut-{len(sources)}-matches-{stamp}.mp4"))
+        else:
+            self.output_edit.setText(str(default))
 
     # -- playback -----------------------------------------------------------
     def _on_player_position(self, seconds: float) -> None:
@@ -855,22 +1081,54 @@ class MainWindow(QMainWindow):
         shown = [e for e in self._media.events if not kinds or e.kind in kinds]
         self.timeline.set_data(self._info.duration_s, shown, self._segments)
 
+        # Rough realtime multipliers for the ETA, not a guarantee: ~120x for stream
+        # copy, ~4.3x for GPU re-encode (measured on an RTX 3070 at p4), ~1.0x for
+        # libx264 on the CPU (Outplayed's own baseline) and roughly half that again
+        # for libx265, which is markedly slower per frame.
+        spec = self._current_spec()
+        if self.mode_copy.isChecked():
+            rate = 120.0
+        elif spec is None or spec.hardware:
+            rate = 4.3
+        elif spec.codec == "hevc":
+            rate = 0.5
+        else:
+            rate = 1.0
+        targets = self._target_matches()
+
+        if len(targets) > 1:
+            # Estimated from the library's own durations rather than probing every
+            # file: ffprobe on a few dozen recordings would stall the UI on each
+            # keystroke. The worker probes properly before anything is encoded.
+            n_events = n_segments = 0
+            content = 0.0
+            for match in targets:
+                media = match.playable_medias[0] if match.playable_medias else None
+                if media is None:
+                    continue
+                segs = build_segments(
+                    media.events, kinds=kinds,
+                    pre_ms=None if use_defaults else self.pre_spin.value() * 1000,
+                    post_ms=None if use_defaults else self.post_spin.value() * 1000,
+                    duration_ms=media.duration_s * 1000 or None,
+                    gap_ms=self.gap_spin.value() * 1000,
+                )
+                n_events += sum(1 for e in media.events if e.kind in kinds)
+                n_segments += len(segs)
+                content += total_duration_s(segs)
+            if n_segments:
+                self.summary.setText(tr(
+                    "summary.multi", matches=len(targets), events=n_events,
+                    segments=n_segments, length=fmt_duration(content),
+                    eta=content / rate))
+            else:
+                self.summary.setText(tr("summary.none"))
+            self.build_btn.setEnabled(bool(n_segments) and self._thread is None)
+            return
+
         content = total_duration_s(self._segments)
         n_events = sum(1 for e in self._media.events if e.kind in kinds)
         if self._segments:
-            # Rough realtime multipliers for the ETA, not a guarantee: ~120x for
-            # stream copy, ~4.3x for GPU re-encode (measured on an RTX 3070 at p4),
-            # ~1.0x for libx264 on the CPU (Outplayed's own baseline) and roughly
-            # half that again for libx265, which is markedly slower per frame.
-            spec = self._current_spec()
-            if self.mode_copy.isChecked():
-                rate = 120.0
-            elif spec is None or spec.hardware:
-                rate = 4.3
-            elif spec.codec == "hevc":
-                rate = 0.5
-            else:
-                rate = 1.0
             self.summary.setText(tr(
                 "summary", events=n_events, segments=len(self._segments),
                 length=fmt_duration(content), eta=content / rate))
@@ -878,7 +1136,44 @@ class MainWindow(QMainWindow):
             self.summary.setText(tr("summary.none"))
         self.build_btn.setEnabled(bool(self._segments) and self._thread is None)
 
+    def _on_output_edited(self, _text: str) -> None:
+        self._output_touched = True
+
+    def _writing_separate(self) -> bool:
+        """True when the run will produce one file per match rather than one montage."""
+        return len(self._checked) > 1 and self.shape_separate.isChecked()
+
+    def _on_shape_changed(self, checked: bool) -> None:
+        if not checked:
+            return          # the radio being switched on reports the settled state
+        self._sync_output_field()
+        self._recompute()
+
+    def _sync_output_field(self) -> None:
+        """Swap the output box between a file path and a folder.
+
+        Separate output writes several files, so a single filename would be
+        meaningless -- the field becomes the folder they land in.
+        """
+        separate = self._writing_separate()
+        self.output_caption.setText(tr("out.dir") if separate else tr("out.file"))
+        if self._output_touched:
+            # Respect a hand-typed path, but it still has to change shape.
+            current = self.output_edit.text().strip()
+            if current:
+                path = Path(current)
+                if separate and path.suffix.lower() == ".mp4":
+                    self.output_edit.setText(str(path.parent))
+                return
+        self._refresh_default_output()
+
     def _browse_output(self) -> None:
+        if self._writing_separate():
+            folder = QFileDialog.getExistingDirectory(
+                self, tr("out.dir"), self.output_edit.text() or "")
+            if folder:
+                self.output_edit.setText(folder)
+            return
         path, _ = QFileDialog.getSaveFileName(
             self, tr("out.file"), self.output_edit.text() or "", "MP4 (*.mp4)")
         if path:
@@ -886,12 +1181,28 @@ class MainWindow(QMainWindow):
 
     # -- render -------------------------------------------------------------
     def _start_render(self) -> None:
-        if not self._media or not self._segments or self._thread is not None:
+        if self._thread is not None:
             return
+        targets = self._target_matches()
+        if not targets:
+            return
+
+        items: list[tuple[Path, list, str]] = []
+        for match in targets:
+            media = match.playable_medias[0] if match.playable_medias else None
+            if media is not None and media.path is not None:
+                items.append((media.path, list(media.events), match.label()))
+        if not items:
+            return
+
+        separate = self._writing_separate()
         out = Path(self.output_edit.text().strip())
-        if not out.name:
-            QMessageBox.warning(self, tr("err.output.title"), tr("err.output.body"))
+        if not str(out).strip() or (not separate and not out.name):
+            QMessageBox.warning(
+                self, tr("err.output.title"),
+                tr("err.output.dir") if separate else tr("err.output.body"))
             return
+
         spec = self._current_spec()
         if spec is None:
             QMessageBox.critical(self, tr("err.encoder.title"), tr("err.encoder.body"))
@@ -904,9 +1215,20 @@ class MainWindow(QMainWindow):
             audio=self.audio_combo.currentData() or "0",
             mode="copy" if self.mode_copy.isChecked() else "encode",
         )
+        use_defaults = self.use_defaults.isChecked()
+        plan = BatchPlan(
+            items=items,
+            kinds=self._selected_kinds(),
+            pre_ms=None if use_defaults else self.pre_spin.value() * 1000,
+            post_ms=None if use_defaults else self.post_spin.value() * 1000,
+            gap_ms=self.gap_spin.value() * 1000,
+            options=options,
+            combine=not separate,
+            output=out,
+        )
 
         self._thread = QThread(self)
-        self._worker = RenderWorker(self._media.path, list(self._segments), out, options)
+        self._worker = RenderWorker(plan)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         # render() fans segments out over a ThreadPoolExecutor, so these are emitted
@@ -935,16 +1257,27 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._worker = None
         self.cancel_btn.setVisible(False)
-        self.build_btn.setEnabled(bool(self._segments))
+        # _recompute owns the button's enabled state for both the single and the
+        # multi-match case, so re-run it rather than guessing here.
+        self._recompute()
 
-    def _on_done(self, result: RenderResult) -> None:
+    def _on_done(self, results: list) -> None:
         self._teardown_thread()
         self.progress.setValue(100)
-        self._last_output = result.output
+        if not results:
+            return
+        self._last_output = results[-1].output
         self.reveal_btn.setEnabled(True)
-        self.statusBar().showMessage(tr(
-            "status.done", name=result.output.name, secs=result.elapsed_s,
-            speed=result.speed_x, mb=result.size_bytes / 1e6), 20000)
+        if len(results) == 1:
+            result = results[0]
+            self.statusBar().showMessage(tr(
+                "status.done", name=result.output.name, secs=result.elapsed_s,
+                speed=result.speed_x, mb=result.size_bytes / 1e6), 20000)
+        else:
+            self.statusBar().showMessage(tr(
+                "status.done.multi", n=len(results),
+                secs=sum(r.elapsed_s for r in results),
+                mb=sum(r.size_bytes for r in results) / 1e6), 20000)
 
     def _on_failed(self, message: str) -> None:
         self._teardown_thread()

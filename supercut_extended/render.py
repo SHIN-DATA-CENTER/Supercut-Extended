@@ -60,6 +60,32 @@ class RenderResult:
     speed_x: float = field(default=0.0)
 
 
+@dataclass
+class RenderJob:
+    """One source file and the slices wanted from it.
+
+    Segment times are always relative to their own source, so several jobs can be
+    combined into one montage without rebasing anything.
+    """
+
+    source: Path
+    segments: Sequence[Segment]
+    label: str = ""
+    output: Path | None = None      # only used by render_each
+
+    @property
+    def content_s(self) -> float:
+        return sum(s.duration_s for s in self.segments)
+
+
+def _audio_index(mode: str, count: int) -> int:
+    """Clamp a track-index audio mode to something the source actually has."""
+    try:
+        return max(0, min(int(mode), count - 1))
+    except ValueError:
+        return 0
+
+
 def _audio_args(mode: str, info: MediaInfo) -> list[str]:
     n = len(info.audio)
     if n == 0 or mode == "none":
@@ -74,11 +100,8 @@ def _audio_args(mode: str, info: MediaInfo) -> list[str]:
             "-filter_complex", f"{inputs}amix=inputs={n}:normalize=0[aout]",
             "-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
         ]
-    try:
-        idx = max(0, min(int(mode), n - 1))
-    except ValueError:
-        idx = 0
-    return ["-map", f"0:a:{idx}", "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    return ["-map", f"0:a:{_audio_index(mode, n)}",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
 
 
 def _copy_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
@@ -97,11 +120,7 @@ def _copy_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
         if opts.audio == "all":
             cmd += ["-map", "0:a"]
         else:
-            try:
-                idx = max(0, min(int(opts.audio), len(info.audio) - 1))
-            except ValueError:
-                idx = 0
-            cmd += ["-map", f"0:a:{idx}"]
+            cmd += ["-map", f"0:a:{_audio_index(opts.audio, len(info.audio))}"]
     else:
         cmd += ["-an"]
     cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
@@ -126,6 +145,69 @@ def _segment_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
     cmd += ["-fps_mode", "cfr", "-video_track_timescale", "60000"]
     cmd += ["-progress", "pipe:1", "-nostats", str(dst)]
     return cmd
+
+
+def _stream_shape(info: MediaInfo, opts: RenderOptions) -> tuple:
+    """What stage 1 will emit for this source, as far as concat cares.
+
+    The concat demuxer refuses to join parts whose streams differ. Re-encoding
+    normalises the codec and the audio layout, but never the geometry -- the encoder
+    inherits width/height/fps from whatever it was fed. A stream copy normalises
+    nothing at all, so every property comes straight from the source.
+    """
+    fps = round(info.fps, 2)
+    if opts.mode == "copy":
+        video: tuple = (info.video_codec, info.pix_fmt, info.width, info.height, fps)
+    else:
+        video = (info.width, info.height, fps)
+
+    n = len(info.audio)
+    if n == 0 or opts.audio == "none":
+        audio: tuple = ()
+    elif opts.audio == "all":
+        # Track count and channel layouts survive; only the codec is normalised.
+        audio = tuple((t.codec if opts.mode == "copy" else "aac", t.channels)
+                      for t in info.audio)
+    elif opts.mode == "copy":
+        track = info.audio[_audio_index(opts.audio, n)]
+        audio = ((track.codec, track.channels),)
+    else:
+        audio = (("aac", 2),)   # a single track and mix are both re-encoded to stereo
+    return (video, audio)
+
+
+def _describe_shape(info: MediaInfo, opts: RenderOptions) -> str:
+    bits = [f"{info.width}x{info.height}", f"{info.fps:.0f}fps"]
+    if opts.mode == "copy":
+        bits.append(info.video_codec)
+    if opts.audio == "none" or not info.audio:
+        bits.append("no audio")
+    elif opts.audio == "all":
+        bits.append(f"{len(info.audio)} audio tracks")
+    else:
+        bits.append("1 audio track")
+    return " ".join(bits)
+
+
+def _check_combinable(jobs: Sequence[RenderJob], infos: dict[Path, MediaInfo],
+                      opts: RenderOptions) -> None:
+    """Refuse up front rather than letting concat fail after a long encode."""
+    groups: dict[tuple, list[RenderJob]] = {}
+    for job in jobs:
+        groups.setdefault(_stream_shape(infos[Path(job.source)], opts), []).append(job)
+    if len(groups) <= 1:
+        return
+
+    lines = []
+    for group in groups.values():
+        info = infos[Path(group[0].source)]
+        names = ", ".join(Path(j.source).name for j in group)
+        lines.append(f"  {_describe_shape(info, opts)}:  {names}")
+    raise RenderError(
+        "these recordings cannot be joined into one file because their streams "
+        "differ:\n" + "\n".join(lines)
+        + "\n\nRender them separately, or select recordings that match."
+    )
 
 
 def _run_with_progress(cmd: list[str], on_seconds: Callable[[float], None],
@@ -173,24 +255,41 @@ def _run_with_progress(cmd: list[str], on_seconds: Callable[[float], None],
         raise RenderError("\n".join(tail) or f"ffmpeg exited {proc.returncode}")
 
 
-def render(
-    source: Path,
-    segments: Sequence[Segment],
+def render_many(
+    jobs: Sequence[RenderJob],
     output: Path,
     options: RenderOptions,
     *,
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
 ) -> RenderResult:
-    """Cut ``segments`` out of ``source`` and write a single montage to ``output``."""
-    source, output = Path(source), Path(output)
-    if not segments:
-        raise RenderError("no segments to render")
-    if not source.exists():
-        raise RenderError(f"source not found: {source}")
+    """Cut every job's segments and write them all to one montage at ``output``.
 
-    info = probe(source)
-    total_s = sum(s.duration_s for s in segments) or 1.0
+    Segments keep the order the jobs are given in, so the caller decides whether the
+    result runs chronologically or some other way.
+    """
+    output = Path(output)
+    jobs = [j for j in jobs if j.segments]
+    if not jobs:
+        raise RenderError("no segments to render")
+
+    infos: dict[Path, MediaInfo] = {}
+    for job in jobs:
+        src = Path(job.source)
+        if not src.exists():
+            raise RenderError(f"source not found: {src}")
+        if src not in infos:
+            infos[src] = probe(src)
+
+    if len(jobs) > 1:
+        _check_combinable(jobs, infos, options)
+
+    # Flatten to (source, segment) so the whole batch shares one worker pool and one
+    # progress total, rather than stalling between files.
+    tasks: list[tuple[Path, Segment]] = [
+        (Path(job.source), seg) for job in jobs for seg in job.segments
+    ]
+    total_s = sum(seg.duration_s for _, seg in tasks) or 1.0
     started = time.monotonic()
 
     def report(done_s: float, msg: str) -> None:
@@ -198,22 +297,27 @@ def render(
             progress(max(0.0, min(1.0, done_s / total_s)), msg)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="supercut_render_"))
-    done_per_seg = [0.0] * len(segments)
+    done_per_seg = [0.0] * len(tasks)
     lock = threading.Lock()
-    report(0.0, f"{len(segments)} segments / {total_s:.1f}s via {options.encoder.name}")
+    scope = (f"{len(tasks)} segments / {total_s:.1f}s via {options.encoder.name}"
+             if len(jobs) == 1 else
+             f"{len(jobs)} recordings / {len(tasks)} segments / {total_s:.1f}s "
+             f"via {options.encoder.name}")
+    report(0.0, scope)
 
     try:
         parts: list[Path] = []
 
         def encode_one(i: int) -> Path:
-            seg = segments[i]
+            source, seg = tasks[i]
+            info = infos[source]
             dst = tmp_dir / f"seg_{i:04d}.mp4"
 
             def on_seconds(sec: float) -> None:
                 with lock:
                     done_per_seg[i] = min(sec, seg.duration_s)
                     total_done = sum(done_per_seg)
-                report(total_done, f"encoding segment {i + 1}/{len(segments)}")
+                report(total_done, f"encoding segment {i + 1}/{len(tasks)}")
 
             try:
                 _run_with_progress(
@@ -233,9 +337,9 @@ def render(
                 raise RenderError(f"segment {i + 1} produced no output")
             return dst
 
-        workers = max(1, min(options.workers, len(segments)))
+        workers = max(1, min(options.workers, len(tasks)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            parts = list(pool.map(encode_one, range(len(segments))))
+            parts = list(pool.map(encode_one, range(len(tasks))))
 
         if cancel is not None and cancel.is_set():
             raise Cancelled("render cancelled")
@@ -260,7 +364,7 @@ def render(
         report(total_s, "done")
         return RenderResult(
             output=output,
-            segments=len(segments),
+            segments=len(tasks),
             content_s=total_s,
             elapsed_s=elapsed,
             encoder=options.encoder.name,
@@ -270,3 +374,58 @@ def render(
     finally:
         if not options.keep_temp:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def render(
+    source: Path,
+    segments: Sequence[Segment],
+    output: Path,
+    options: RenderOptions,
+    *,
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+) -> RenderResult:
+    """Cut ``segments`` out of ``source`` and write a single montage to ``output``."""
+    return render_many([RenderJob(Path(source), segments)], output, options,
+                       progress=progress, cancel=cancel)
+
+
+def render_each(
+    jobs: Sequence[RenderJob],
+    options: RenderOptions,
+    *,
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+    on_result: Callable[[RenderResult], None] | None = None,
+) -> list[RenderResult]:
+    """Render every job to its own ``job.output``, one after another.
+
+    Progress is reported as a single fraction across the whole batch, weighted by how
+    much footage each job contributes, so the bar does not restart per file. Jobs run
+    sequentially: each one already saturates the encoder with its own worker pool.
+    """
+    jobs = [j for j in jobs if j.segments]
+    if not jobs:
+        raise RenderError("no segments to render")
+    missing = [j for j in jobs if j.output is None]
+    if missing:
+        raise RenderError("render_each needs an output path on every job")
+
+    weights = [j.content_s or 1.0 for j in jobs]
+    grand = sum(weights)
+    results: list[RenderResult] = []
+    done_before = 0.0
+
+    for i, job in enumerate(jobs):
+        def sub(frac: float, msg: str, i=i, base=done_before) -> None:
+            if progress:
+                progress(min(1.0, (base + frac * weights[i]) / grand),
+                         f"[{i + 1}/{len(jobs)}] {msg}")
+
+        results.append(render_many([job], job.output, options,
+                                   progress=sub, cancel=cancel))
+        if on_result:
+            on_result(results[-1])
+        done_before += weights[i]
+
+    return results

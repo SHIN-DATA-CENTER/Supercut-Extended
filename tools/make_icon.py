@@ -22,7 +22,8 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import (QColor, QLinearGradient, QPainter, QPainterPath, QPen,
+                           QPixmap)
 from PySide6.QtWidgets import QApplication
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -32,7 +33,6 @@ GLYPH = "Edit/Layers"
 GLYPH_COLOR = "#7cb2ff"
 PLATE_TOP = "#1b2436"
 PLATE_BOTTOM = "#10151f"
-PLATE_EDGE = "#2b3purple"  # replaced below; kept obvious if ever mis-edited
 PLATE_EDGE = "#33405a"
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
@@ -53,14 +53,12 @@ def render(size: int) -> QPixmap:
     path = QPainterPath()
     path.addRoundedRect(plate, radius, radius)
 
-    from PySide6.QtGui import QLinearGradient
     grad = QLinearGradient(plate.topLeft(), plate.bottomLeft())
     grad.setColorAt(0.0, QColor(PLATE_TOP))
     grad.setColorAt(1.0, QColor(PLATE_BOTTOM))
     p.fillPath(path, grad)
 
     if size >= 24:
-        from PySide6.QtGui import QPen
         p.setPen(QPen(QColor(PLATE_EDGE), max(1.0, size * 0.012)))
         p.drawPath(path)
 
@@ -74,14 +72,15 @@ def render(size: int) -> QPixmap:
 
 
 def png_bytes(px: QPixmap) -> bytes:
-    # QBuffer only stores a *pointer* to the QByteArray it wraps, so the array must be
-    # kept alive in a named variable -- an inline QByteArray() temporary gets garbage
-    # collected while still referenced, corrupting the heap.
-    data = QByteArray()
-    buf = QBuffer(data)
+    # QBuffer only stores a *pointer* to the QByteArray it wraps, so the array has to
+    # stay referenced from Python: passing a temporary (`QBuffer(QByteArray())`) lets
+    # it be collected out from under the buffer, which segfaults.
+    store = QByteArray()
+    buf = QBuffer(store)
     buf.open(QBuffer.WriteOnly)
     px.save(buf, "PNG")
-    return bytes(buf.data())
+    buf.close()
+    return bytes(store)
 
 
 def build_ico(images: list[tuple[int, bytes]], dest: Path) -> None:
