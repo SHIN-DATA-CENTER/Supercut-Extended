@@ -38,7 +38,13 @@ def resolve_match(matches: list[Match], selector: str) -> Match:
     """Row numbers are positions in the SAME filtered list `list` printed.
 
     So `build` must be given the same --game filter as `list`, otherwise use a match
-    id prefix, which is stable regardless of filtering.
+    id, which is stable regardless of filtering.
+
+    Careful with id *prefixes*: Outplayed numbers matches within a session, so a
+    match id is "<32-char session hash>_<n>" and every match recorded in one sitting
+    shares all but the last characters. A short prefix therefore matches several
+    matches, and silently rendering the first of them is how you end up with the
+    wrong footage -- so an ambiguous selector is refused rather than guessed.
     """
     if selector.isdigit():
         idx = int(selector) - 1
@@ -48,10 +54,26 @@ def resolve_match(matches: list[Match], selector: str) -> Match:
             f"no match #{selector} (have 1..{len(matches)}). "
             "If you filtered `list` with --game, pass the same --game to `build`."
         )
+
+    exact = [m for m in matches
+             if selector in (m.match_id, m.original_match_id)]
+    if len(exact) == 1:
+        return exact[0]
+
     hits = [m for m in matches if m.match_id.startswith(selector)
             or m.original_match_id.startswith(selector)]
     if not hits:
         raise SystemExit(f"no match matching id {selector!r}")
+    if len(hits) > 1:
+        listing = "\n".join(
+            f"  {m.match_id}  {m.started_at:%Y-%m-%d %H:%M}  {m.game_name}"
+            for m in hits[:10])
+        more = f"\n  ... and {len(hits) - 10} more" if len(hits) > 10 else ""
+        raise SystemExit(
+            f"{selector!r} matches {len(hits)} matches. Outplayed ids share a session "
+            f"prefix, so pass enough to be unique (the trailing _<n> is what differs):"
+            f"\n{listing}{more}"
+        )
     return hits[0]
 
 
