@@ -1,11 +1,11 @@
-# Supercut Extended  v1.0.0
+# Supercut Extended
 
 Outplayed の Supercut を **GPU (NVENC)** で作り直す外部ツール。
 イベント検出と録画は Outplayed のものをそのまま使い、**結合・エンコードの工程だけを置き換える**。
 
 ---
 
-## なぜ作ったか
+## 背景
 
 Outplayed は録画も手動エクスポートも既に GPU を使っているのに、**Supercut だけが CPU の libx264**
 で処理している。`ffprobe` の `TAG:encoder` で経路ごとに確認した結果:
@@ -44,13 +44,19 @@ Outplayed は録画も手動エクスポートも既に GPU を使っている�
 
 ### exe 版（ビルド済み）
 
+<<<<<<< HEAD
 `dist\` の中の **`SupercutExtended.exe`** を起動するだけ。
+=======
+**`SupercutExtended.exe`** を起動するだけ。
+※前提としてOutPlayedを利用していること。
+>>>>>>> 57aa2c36a71f8212440bb6a0404432b9981a5b44
 
 | ファイル | 大きさ | 用途 |
 |---|---|---|
 | `SupercutExtended.exe` | 43 MB | GUI 本体 |
 | `SupercutExtended-cli.exe` | 43 MB | コマンドライン版（`... list` など） |
 
+<<<<<<< HEAD
 **それぞれ 1 ファイルで完結している。** Python も PySide6 も exe の中に入っているので、
 Python のインストールも、隣に置くフォルダも要らない。どこにコピーしても単体で動く。
 2 つは独立しているので、GUI しか使わないなら `SupercutExtended.exe` だけ持っていけばよい。
@@ -60,6 +66,8 @@ Python のインストールも、隣に置くフォルダも要らない。ど�
 フォルダ**に置けば認識する（`ffmpeg\` や `bin\` サブフォルダでも可）。見つからない場合は
 起動時にその旨を表示する。
 
+=======
+>>>>>>> 57aa2c36a71f8212440bb6a0404432b9981a5b44
 自分でビルドし直す場合:
 
 ```bash
