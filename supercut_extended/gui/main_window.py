@@ -25,7 +25,9 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__, updater
-from ..encoder import EncoderSpec, available_encoders, group_by_engine, vendor_label
+from ..encoder import (DEFAULT_QUALITY, QUALITY_TIERS, EncoderSpec,
+                       available_encoders, estimate_rate, group_by_engine,
+                       vendor_label)
 from ..library import matches_with_highlights, read_matches
 from ..model import HIGHLIGHT_KINDS, Match, Media
 from ..probe import MediaInfo, probe
@@ -38,14 +40,6 @@ from .player import VideoPlayer
 from .style import ACCENT_HI, TEXT, TEXT_DIM, build_style, checkbox_style
 from .timeline import TimelineWidget, event_color
 from .update_dialog import UpdateCheck, UpdateDialog
-
-# CQ/QP/CRF-style quality values, all on the same "lower is better, bigger file"
-# scale ffmpeg uses for -cq/-global_quality/-qp_i/-crf -- one shared friendly scale
-# is enough because every encoder branch in encoder.video_args() already applies the
-# same number without per-vendor rescaling.
-QUALITY_TIERS = (18, 21, 23, 26, 30)
-DEFAULT_QUALITY = 23
-
 
 class LibraryLoader(QThread):
     loaded = Signal(list)
@@ -520,6 +514,9 @@ class MainWindow(QMainWindow):
             self.quality_combo.addItem(label, cq)
         self.quality_combo.setCurrentIndex(QUALITY_TIERS.index(DEFAULT_QUALITY))
         self.quality_combo.currentIndexChanged.connect(self._recompute)
+        # The preset had no connection at all, so the estimate never moved when it
+        # changed. _on_codec_changed refills this combo with signals blocked.
+        self.preset_combo.currentIndexChanged.connect(self._recompute)
 
         self.audio_combo = self._combo()
 
@@ -1049,17 +1046,24 @@ class MainWindow(QMainWindow):
         self._on_codec_changed()
 
     def _on_codec_changed(self) -> None:
-        self.preset_combo.clear()
         spec = self._current_spec()
         if spec is None:
             return
-        for name in spec.presets:
-            label = f"{tr(f'preset.{name}')} ({name})"
-            if name == spec.default_preset:
-                label = tr("out.preset.recommended", name=label)
-            self.preset_combo.addItem(label, name)
-        i = self.preset_combo.findData(spec.default_preset)
-        self.preset_combo.setCurrentIndex(i if i >= 0 else 0)
+        # Refilling the combo emits currentIndexChanged for every step, which would
+        # re-run the estimate several times mid-rebuild. Silence it and recompute once
+        # at the end instead.
+        self.preset_combo.blockSignals(True)
+        try:
+            self.preset_combo.clear()
+            for name in spec.presets:
+                label = f"{tr(f'preset.{name}')} ({name})"
+                if name == spec.default_preset:
+                    label = tr("out.preset.recommended", name=label)
+                self.preset_combo.addItem(label, name)
+            i = self.preset_combo.findData(spec.default_preset)
+            self.preset_combo.setCurrentIndex(i if i >= 0 else 0)
+        finally:
+            self.preset_combo.blockSignals(False)
         self._recompute()
 
     def _selected_kinds(self) -> list[str]:
@@ -1081,19 +1085,14 @@ class MainWindow(QMainWindow):
         shown = [e for e in self._media.events if not kinds or e.kind in kinds]
         self.timeline.set_data(self._info.duration_s, shown, self._segments)
 
-        # Rough realtime multipliers for the ETA, not a guarantee: ~120x for stream
-        # copy, ~4.3x for GPU re-encode (measured on an RTX 3070 at p4), ~1.0x for
-        # libx264 on the CPU (Outplayed's own baseline) and roughly half that again
-        # for libx265, which is markedly slower per frame.
-        spec = self._current_spec()
-        if self.mode_copy.isChecked():
-            rate = 120.0
-        elif spec is None or spec.hardware:
-            rate = 4.3
-        elif spec.codec == "hevc":
-            rate = 0.5
-        else:
-            rate = 1.0
+        # Rough realtime multiplier for the ETA, from encoder.estimate_rate() so the
+        # preset and the quality both move it (see the measured tables there).
+        rate = estimate_rate(
+            self._current_spec(),
+            preset=self.preset_combo.currentData() or "",
+            quality=self.quality_combo.currentData() or DEFAULT_QUALITY,
+            mode="copy" if self.mode_copy.isChecked() else "encode",
+        )
         targets = self._target_matches()
 
         if len(targets) > 1:

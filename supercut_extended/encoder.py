@@ -25,6 +25,12 @@ from .probe import ffmpeg_path, run
 NVENC_PRESETS = ("p1", "p2", "p3", "p4", "p5", "p6", "p7")
 X264_PRESETS = ("ultrafast", "veryfast", "faster", "fast", "medium", "slow")
 
+# CQ/QP/CRF-style quality values, all on the same "lower is better, bigger file" scale
+# ffmpeg uses for -cq/-global_quality/-qp_i/-crf. One shared scale is enough because
+# every branch in video_args() applies the number without per-vendor rescaling.
+QUALITY_TIERS = (18, 21, 23, 26, 30)
+DEFAULT_QUALITY = 23
+
 
 @dataclass(frozen=True)
 class EncoderSpec:
@@ -95,6 +101,109 @@ def vendor_label(name: str) -> str:
     if name.endswith("_qsv"):
         return "Intel"
     return ""
+
+
+# --- speed model -----------------------------------------------------------
+#
+# Measured with tools/bench_presets.py on an RTX 3070 / i5-12600KF at 1080p60, then
+# normalised so each encoder's default preset and DEFAULT_QUALITY are exactly 1.00.
+# Only ratios are stored: BASE_RATES below carries the absolute end-to-end speed,
+# which includes per-segment and muxing overhead a single synthetic clip cannot show.
+#
+# The headline result is that the preset dominates and the quality barely matters on
+# a GPU: NVENC is fixed-function, so changing the rate-control target does not change
+# how much work the silicon does (measured 0.98-1.01 across cq18..cq30, i.e. noise).
+# On the CPU the CRF genuinely changes the bit count and so the encode time.
+_PRESET_FACTORS: dict[str, dict[str, float]] = {
+    "h264_nvenc": {"p1": 1.56, "p2": 1.53, "p3": 1.33, "p4": 1.00,
+                   "p5": 0.62, "p6": 0.58, "p7": 0.46},
+    "hevc_nvenc": {"p1": 1.17, "p2": 1.17, "p3": 1.17, "p4": 1.00,
+                   "p5": 0.78, "p6": 0.46, "p7": 0.42},
+    "libx264": {"ultrafast": 1.99, "veryfast": 1.00, "faster": 0.64,
+                "fast": 0.54, "medium": 0.41, "slow": 0.34},
+    "libx265": {"ultrafast": 1.68, "veryfast": 1.00, "faster": 0.93,
+                "fast": 0.68, "medium": 0.68, "slow": 0.26},
+}
+
+_QUALITY_FACTORS: dict[str, dict[int, float]] = {
+    # Flat within measurement noise -- kept explicit so it is clear this was measured
+    # rather than forgotten.
+    "h264_nvenc": {18: 1.00, 21: 1.00, 23: 1.00, 26: 1.00, 30: 1.00},
+    "hevc_nvenc": {18: 1.00, 21: 1.00, 23: 1.00, 26: 1.00, 30: 1.00},
+    "libx264": {18: 0.91, 21: 0.95, 23: 1.00, 26: 1.05, 30: 1.15},
+    "libx265": {18: 0.82, 21: 0.92, 23: 1.00, 26: 1.11, 30: 1.23},
+}
+
+# End-to-end realtime multipliers at each encoder's default preset and quality,
+# measured on a real 27-segment / 55.5s job at 1080p60 rather than on a single clip.
+# That distinction matters: every segment is cut by its own ffmpeg invocation, so a
+# montage made of many short clips pays a fixed startup per segment on top of the
+# encoding. Anchoring on a synthetic single-clip run gave 4.3x for h264_nvenc where
+# the real pipeline delivers 2.6x, and an absurd 1.0x for libx264 that was really 2.5x.
+#
+# A single scalar cannot capture the per-segment cost exactly: jobs built from long
+# clips run faster than this and jobs of very short clips slower. It is an estimate.
+BASE_RATES: dict[str, float] = {
+    "h264_nvenc": 2.6,
+    "hevc_nvenc": 2.8,
+    "libx264": 2.5,
+    "libx265": 1.0,
+}
+COPY_RATE = 120.0          # stream copy does no encoding at all
+
+
+def _interpolate(table: dict[int, float], value: int) -> float:
+    """Look `value` up in a quality table, interpolating between the measured tiers.
+
+    The GUI only offers the tiers, but --quality on the CLI takes any number.
+    """
+    if not table:
+        return 1.0
+    if value in table:
+        return table[value]
+    keys = sorted(table)
+    if value <= keys[0]:
+        return table[keys[0]]
+    if value >= keys[-1]:
+        return table[keys[-1]]
+    lo = max(k for k in keys if k < value)
+    hi = min(k for k in keys if k > value)
+    span = hi - lo
+    return table[lo] + (table[hi] - table[lo]) * ((value - lo) / span)
+
+
+def speed_factor(spec: EncoderSpec, *, preset: str, quality: int) -> float:
+    """How much faster/slower than this encoder's defaults these settings run.
+
+    Preset and quality are treated as independent and multiplied. That held to within
+    a few percent for NVENC and libx265; libx264 was the outlier at about -20% at the
+    extreme corners (ultrafast+cq30, slow+cq18), which is acceptable for an estimate
+    that is already labelled approximate.
+
+    Encoders whose video_args() ignore the preset (AMF, QSV) fall back to 1.0.
+    """
+    preset_factor = _PRESET_FACTORS.get(spec.name, {}).get(preset, 1.0)
+    quality_factor = _interpolate(_QUALITY_FACTORS.get(spec.name, {}), quality)
+    return preset_factor * quality_factor
+
+
+def estimate_rate(spec: EncoderSpec | None, *, preset: str, quality: int,
+                  mode: str = "encode") -> float:
+    """Rough realtime multiplier for a render, for showing an ETA.
+
+    Never a guarantee -- it ignores the source resolution, what else the machine is
+    doing, and the fixed cost of starting ffmpeg once per segment.
+    """
+    if mode == "copy":
+        return COPY_RATE
+    if spec is None:
+        return BASE_RATES["h264_nvenc"]
+    base = BASE_RATES.get(spec.name)
+    if base is None:
+        # AMF/QSV are not measured here; assume they land near the NVENC figures, and
+        # treat an unknown CPU encoder as the slower HEVC case.
+        base = 2.6 if spec.hardware else (1.0 if spec.codec == "hevc" else 2.5)
+    return max(0.01, base * speed_factor(spec, preset=preset, quality=quality))
 
 
 def pick_encoder(preferred: str | None = None) -> EncoderSpec:
