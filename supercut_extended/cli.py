@@ -1,0 +1,253 @@
+"""Command line interface.
+
+The GUI drives exactly the same core functions; this exists so the pipeline can be
+exercised and verified without any UI in the way.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+from .encoder import available_encoders, describe, pick_encoder
+from .library import LibraryError, matches_with_highlights, read_matches
+from .model import HIGHLIGHT_KINDS, Match
+from .probe import ProbeError, probe
+from .render import RenderOptions, render
+from .segments import build_segments, total_duration_s
+
+
+def default_output_dir(source: Path) -> Path:
+    """Outplayed's media root is <root>/<Game>/<session>/<file>.mp4."""
+    parents = source.parents
+    root = parents[2] if len(parents) >= 3 else source.parent
+    return root / "Exports"
+
+
+def filter_by_game(matches: list[Match], game: str | None) -> list[Match]:
+    if not game:
+        return matches
+    needle = game.lower()
+    return [m for m in matches if needle in m.game_name.lower()]
+
+
+def resolve_match(matches: list[Match], selector: str) -> Match:
+    """Row numbers are positions in the SAME filtered list `list` printed.
+
+    So `build` must be given the same --game filter as `list`, otherwise use a match
+    id prefix, which is stable regardless of filtering.
+    """
+    if selector.isdigit():
+        idx = int(selector) - 1
+        if 0 <= idx < len(matches):
+            return matches[idx]
+        raise SystemExit(
+            f"no match #{selector} (have 1..{len(matches)}). "
+            "If you filtered `list` with --game, pass the same --game to `build`."
+        )
+    hits = [m for m in matches if m.match_id.startswith(selector)
+            or m.original_match_id.startswith(selector)]
+    if not hits:
+        raise SystemExit(f"no match matching id {selector!r}")
+    return hits[0]
+
+
+def cmd_encoders(_: argparse.Namespace) -> int:
+    print("Usable encoders (probed by actually encoding frames):")
+    print(describe())
+    found = available_encoders()
+    if found and not found[0].hardware:
+        print("\nWARNING: no GPU encoder available - output would still be CPU-bound.")
+    return 0
+
+
+def _print_match_table(matches: list[Match]) -> None:
+    print(f"{'#':>3}  {'when':<16} {'game':<18} {'dur':>7}  events")
+    print("-" * 78)
+    for i, m in enumerate(matches, 1):
+        counts = m.event_counts()
+        summary = " ".join(f"{k}:{v}" for k, v in sorted(counts.items())
+                           if k in HIGHLIGHT_KINDS or v > 2) or "-"
+        info = m.info or {}
+        game = m.game_name[:18]
+        extra = f" {info['map']}" if info.get("map") else ""
+        print(f"{i:>3}  {m.started_at:%Y-%m-%d %H:%M}  {game:<18} "
+              f"{m.duration_s / 60:>6.1f}m  {summary}{extra}")
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    matches = read_matches(args.db)
+    playable = matches_with_highlights(matches)
+    playable = filter_by_game(playable, args.game)[: args.limit]
+    if not playable:
+        print("No matches with highlights found.")
+        return 1
+    _print_match_table(playable)
+    print(f"\n{len(playable)} shown. Use: supercut build <#> --events kill")
+    return 0
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    matches = filter_by_game(matches_with_highlights(read_matches(args.db)), args.game)
+    match = resolve_match(matches, args.match)
+    print(f"{match.label()}   id={match.match_id}")
+    for media in match.playable_medias:
+        print(f"\n  media #{media.media_id}  {media.path}")
+        print(f"    db duration {media.duration_s:.1f}s, {len(media.events)} events")
+        for e in media.events:
+            print(f"      {e.time_ms / 1000:9.3f}s  {e.kind:<12} "
+                  f"pre={e.pre_ms:>6} post={e.post_ms:>6}"
+                  + (f"  #{e.counter}" if e.counter else ""))
+    return 0
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    matches = filter_by_game(matches_with_highlights(read_matches(args.db)), args.game)
+    match = resolve_match(matches, args.match)
+
+    medias = match.playable_medias
+    if args.media is not None:
+        medias = [m for m in medias if m.media_id == args.media]
+    if not medias:
+        raise SystemExit("no playable media with events for this match")
+    media = medias[0]
+    if len(medias) > 1:
+        print(f"note: match has {len(medias)} medias, using #{media.media_id} "
+              f"(--media to choose)")
+
+    kinds = [k.strip() for k in args.events.split(",") if k.strip()] if args.events else None
+    try:
+        info = probe(media.path)
+    except ProbeError as exc:
+        raise SystemExit(str(exc))
+
+    segments = build_segments(
+        media.events,
+        kinds=kinds,
+        pre_ms=args.pre * 1000 if args.pre is not None else None,
+        post_ms=args.post * 1000 if args.post is not None else None,
+        duration_ms=info.duration_ms,
+        gap_ms=args.gap * 1000,
+    )
+    if not segments:
+        have = ", ".join(sorted(match.event_counts())) or "none"
+        raise SystemExit(f"no events matched {kinds}. This match has: {have}")
+
+    content_s = total_duration_s(segments)
+    print(f"{match.label()}")
+    print(f"  source   {media.path.name}")
+    print(f"           {info.width}x{info.height} {info.fps:.0f}fps "
+          f"{info.duration_s:.1f}s  {len(info.audio)} audio track(s)")
+    print(f"  events   {sum(1 for e in media.events if not kinds or e.kind in kinds)}"
+          f" -> {len(segments)} segments, {content_s:.1f}s of content")
+
+    if args.dry_run:
+        for i, s in enumerate(segments, 1):
+            print(f"    {i:>3}. {s.start_s:9.3f}s -> {s.end_ms / 1000:9.3f}s "
+                  f"({s.duration_s:6.2f}s)")
+        return 0
+
+    spec = pick_encoder(args.encoder)
+    if not spec.hardware:
+        print(f"  WARNING: falling back to {spec.name} (CPU) - no GPU encoder usable")
+
+    out = Path(args.output) if args.output else (
+        default_output_dir(media.path)
+        / f"{media.path.stem}-supercut-{datetime.now():%Y%m%d-%H%M%S}.mp4"
+    )
+
+    opts = RenderOptions(
+        encoder=spec, preset=args.preset or spec.default_preset,
+        quality=args.quality, max_rate_kbps=args.max_rate,
+        audio=args.audio, workers=args.workers, mode=args.mode,
+    )
+    if opts.mode == "copy":
+        print(f"  mode     copy (stream copy, no re-encode) audio={opts.audio}")
+    else:
+        print(f"  encoder  {spec.name} preset={opts.preset} cq={opts.quality} "
+              f"audio={opts.audio} workers={opts.workers}")
+    print(f"  output   {out}\n")
+
+    last = [0.0]
+
+    def on_progress(frac: float, msg: str) -> None:
+        now = time.monotonic()
+        if now - last[0] < 0.2 and frac < 1.0:
+            return
+        last[0] = now
+        bar = "#" * int(frac * 34)
+        sys.stdout.write(f"\r  [{bar:<34}] {frac * 100:5.1f}%  {msg[:44]:<44}")
+        sys.stdout.flush()
+
+    result = render(media.path, segments, out, opts, progress=on_progress)
+    sys.stdout.write("\r" + " " * 100 + "\r")
+
+    print(f"  done in {result.elapsed_s:.1f}s  "
+          f"({result.speed_x:.1f}x realtime, {result.size_bytes / 1e6:.1f} MB)")
+    print(f"  {result.output}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="supercut", description="GPU-accelerated Supercut for Outplayed recordings"
+    )
+    ap.add_argument("--db", type=Path, help="override the Outplayed IndexedDB path")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("encoders", help="show which encoders actually work here")
+    p.set_defaults(func=cmd_encoders)
+
+    p = sub.add_parser("list", help="list matches that have highlights")
+    p.add_argument("--game", help="filter by game name")
+    p.add_argument("--limit", type=int, default=40)
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("events", help="show every detected event for a match")
+    p.add_argument("match", help="row number from `list`, or a match id prefix")
+    p.add_argument("--game", help="same filter you passed to `list`")
+    p.set_defaults(func=cmd_events)
+
+    p = sub.add_parser("build", help="render a supercut")
+    p.add_argument("match", help="row number from `list`, or a match id prefix")
+    p.add_argument("--game", help="same filter you passed to `list`")
+    p.add_argument("--events", default="kill",
+                   help="comma separated kinds, or empty for all (default: kill)")
+    p.add_argument("--pre", type=float, help="seconds before each event (override)")
+    p.add_argument("--post", type=float, help="seconds after each event (override)")
+    p.add_argument("--gap", type=float, default=0.0,
+                   help="also merge segments closer than this many seconds")
+    p.add_argument("--media", type=int, help="media id when a match has several")
+    p.add_argument("--encoder", help="force an encoder (default: best GPU available)")
+    p.add_argument("--preset", help="encoder preset (NVENC p1-p7)")
+    p.add_argument("--quality", type=int, default=23, help="CQ/CRF, lower is better")
+    p.add_argument("--max-rate", type=int, default=25000, help="ceiling in kbit/s")
+    p.add_argument("--audio", default="0", help="track index, 'all', 'mix' or 'none'")
+    p.add_argument("--workers", type=int, default=2, help="parallel segment encodes")
+    p.add_argument("--mode", choices=("encode", "copy"), default="encode",
+                   help="encode = Outplayed-equivalent re-encode on GPU (default); "
+                        "copy = no re-encode, near-instant, cuts snap to keyframes")
+    p.add_argument("--output", help="output file path")
+    p.add_argument("--dry-run", action="store_true", help="print segments and stop")
+    p.set_defaults(func=cmd_build)
+
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except LibraryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

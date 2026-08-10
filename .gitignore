@@ -1,5 +1,7 @@
+requirements.txt
+
 # Icons Folder
-coolicons SVG/
+cooliocns SVG/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
