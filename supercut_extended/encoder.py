@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Sequence
 
 from .probe import ffmpeg_path, run
 
@@ -48,8 +49,11 @@ CANDIDATES = (
     EncoderSpec("h264_nvenc", "NVENC H.264 (GPU)", "h264", True),
     EncoderSpec("hevc_nvenc", "NVENC HEVC (GPU)", "hevc", True),
     EncoderSpec("h264_amf", "AMD AMF H.264 (GPU)", "h264", True),
+    EncoderSpec("hevc_amf", "AMD AMF HEVC (GPU)", "hevc", True),
     EncoderSpec("h264_qsv", "Intel QSV H.264 (GPU)", "h264", True),
+    EncoderSpec("hevc_qsv", "Intel QSV HEVC (GPU)", "hevc", True),
     EncoderSpec("libx264", "libx264 (CPU fallback)", "h264", False),
+    EncoderSpec("libx265", "libx265 (CPU fallback)", "hevc", False),
 )
 
 
@@ -67,6 +71,30 @@ def _encoder_works(name: str) -> bool:
 def available_encoders() -> tuple[EncoderSpec, ...]:
     """Encoders this machine can genuinely use, best first."""
     return tuple(spec for spec in CANDIDATES if _encoder_works(spec.name))
+
+
+def group_by_engine(specs: Sequence[EncoderSpec]) -> dict[tuple[bool, str], EncoderSpec]:
+    """Best usable encoder per (hardware, codec) pair, for a CPU/GPU x H.264/HEVC picker.
+
+    ``specs`` is expected in CANDIDATES priority order, so on a machine with more than
+    one GPU (rare, but AMF+QSV laptops exist) the first -- best -- hit for a given
+    codec wins and later ones are ignored via ``setdefault``.
+    """
+    out: dict[tuple[bool, str], EncoderSpec] = {}
+    for spec in specs:
+        out.setdefault((spec.hardware, spec.codec), spec)
+    return out
+
+
+def vendor_label(name: str) -> str:
+    """Short GPU vendor name for a hardware encoder, for display in the UI."""
+    if name.endswith("_nvenc"):
+        return "NVIDIA"
+    if name.endswith("_amf"):
+        return "AMD"
+    if name.endswith("_qsv"):
+        return "Intel"
+    return ""
 
 
 def pick_encoder(preferred: str | None = None) -> EncoderSpec:
@@ -115,17 +143,17 @@ def video_args(spec: EncoderSpec, *, preset: str, quality: int, max_rate_kbps: i
             "-aq-strength", "8",
         ]
         args += ["-profile:v", "main" if spec.codec == "hevc" else "high"]
-    elif spec.name == "h264_amf":
+    elif spec.name.endswith("_amf"):
         args += ["-quality", "quality", "-rc", "vbr_peak",
                  "-qp_i", str(quality), "-qp_p", str(quality),
                  "-maxrate", f"{max_rate_kbps}k"]
-    elif spec.name == "h264_qsv":
+    elif spec.name.endswith("_qsv"):
         args += ["-preset", "veryfast", "-global_quality", str(quality),
                  "-maxrate", f"{max_rate_kbps}k"]
     else:
         args += ["-preset", preset, "-crf", str(quality),
                  "-maxrate", f"{max_rate_kbps}k", "-bufsize", f"{max_rate_kbps * 2}k",
-                 "-profile:v", "high"]
+                 "-profile:v", "main" if spec.codec == "hevc" else "high"]
 
     # Explicit 4:2:0 -- this is the bug in Outplayed's own output. Only meaningful on
     # the software path; GPU frames are already NV12 and adding it breaks the graph.
@@ -138,9 +166,9 @@ def decode_args(spec: EncoderSpec) -> list[str]:
     """Input-side hardware decode flags, so frames never leave the GPU."""
     if spec.name.endswith("_nvenc"):
         return ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-    if spec.name == "h264_qsv":
+    if spec.name.endswith("_qsv"):
         return ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
-    if spec.name == "h264_amf":
+    if spec.name.endswith("_amf"):
         return ["-hwaccel", "d3d11va"]
     return []
 

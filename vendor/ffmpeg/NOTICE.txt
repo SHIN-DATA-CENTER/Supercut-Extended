@@ -1,0 +1,22 @@
+This folder vendors a prebuilt, unmodified FFmpeg (ffmpeg.exe, ffprobe.exe) so the
+app does not depend on a system install. Supercut Extended calls these two binaries
+as separate subprocesses (command-line arguments + stdout/stderr) -- it does not link
+against libavcodec/libavformat/etc. Supercut Extended itself remains MIT-licensed
+(see the repository's own LICENSE); only these two vendored executables are GPLv3.
+
+Build used
+----------
+ffmpeg-8.1.2-essentials_build, built by gyan.dev (https://www.gyan.dev/ffmpeg/builds/)
+Downloaded from: https://github.com/GyanD/codexffmpeg/releases/tag/8.1.2
+License: GPLv3 (full text in LICENSE-FFmpeg-GPLv3.txt, copied unmodified from the
+release archive)
+
+Corresponding source (GPLv3 SS6)
+---------------------------------
+FFmpeg source at the commit this build was made from:
+  https://github.com/FFmpeg/FFmpeg/commit/38b88335f9
+Build scripts/toolchain used to produce this specific Windows build:
+  https://github.com/GyanD/codexffmpeg
+
+Filenames are unmodified (ffmpeg.exe / ffprobe.exe). To refetch this exact build,
+run `python tools/fetch_ffmpeg.py`.

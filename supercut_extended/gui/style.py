@@ -57,9 +57,9 @@ QLabel#timecode {{ font-family: Consolas, "Courier New", monospace;
     color: {TEXT_DIM}; padding-left: 8px; }}
 QLabel#sectionLabel {{ color: {TEXT}; font-weight: 700; font-size: 12px;
     letter-spacing: 0.5px; }}
-QLabel#fieldLabel {{ color: {TEXT_DIM}; font-size: 11px; }}
-QLabel#captionLabel {{ color: {TEXT_FAINT}; font-size: 11px;
-    padding-left: 28px; margin-top: -4px; }}
+QLabel#fieldLabel {{ color: {TEXT_DIM}; font-size: 12px; }}
+QLabel#captionLabel {{ color: {TEXT_DIM}; font-size: 12px;
+    padding-left: 28px; margin-top: -2px; }}
 QFrame#sectionRule {{ background: {BORDER}; border: 0; max-height: 1px; }}
 
 QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER_SOFT};

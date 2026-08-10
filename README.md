@@ -44,34 +44,29 @@ Outplayed は録画も手動エクスポートも既に GPU を使っている�
 
 ### exe 版（ビルド済み）
 
-<<<<<<< HEAD
-`dist\` の中の **`SupercutExtended.exe`** を起動するだけ。
-=======
 **`SupercutExtended.exe`** を起動するだけ。
 ※前提としてOutPlayedを利用していること。
->>>>>>> 57aa2c36a71f8212440bb6a0404432b9981a5b44
 
 | ファイル | 大きさ | 用途 |
 |---|---|---|
-| `SupercutExtended.exe` | 43 MB | GUI 本体 |
-| `SupercutExtended-cli.exe` | 43 MB | コマンドライン版（`... list` など） |
+| `SupercutExtended.exe` | 114 MB | GUI 本体 |
+| `SupercutExtended-cli.exe` | 114 MB | コマンドライン版（`... list` など） |
 
-<<<<<<< HEAD
-**それぞれ 1 ファイルで完結している。** Python も PySide6 も exe の中に入っているので、
-Python のインストールも、隣に置くフォルダも要らない。どこにコピーしても単体で動く。
+**それぞれ 1 ファイルで完結している。** Python も PySide6 も、**ffmpeg 本体も** exe の中に
+入っているので、インストールも、隣に置くフォルダも要らない。どこにコピーしても単体で動く。
 2 つは独立しているので、GUI しか使わないなら `SupercutExtended.exe` だけ持っていけばよい。
 
-**ただし ffmpeg だけは別**（サイズと GPL 再配布の都合で同梱していない）。PATH に ffmpeg が
-あればそのまま動く。無い PC に持っていく場合は `ffmpeg.exe` と `ffprobe.exe` を **exe と同じ
-フォルダ**に置けば認識する（`ffmpeg\` や `bin\` サブフォルダでも可）。見つからない場合は
-起動時にその旨を表示する。
+同梱している ffmpeg は gyan.dev の `ffmpeg-8.1.2-essentials_build`（**GPLv3**）。
+libx264 / libx265 / NVENC / AMD AMF / Intel QSV の H.264・HEVC が全部有効な、
+公式 Windows ビルドで唯一の組み合わせを選んでいる。再配布上の注意点は
+[`vendor/ffmpeg/NOTICE.txt`](vendor/ffmpeg/NOTICE.txt) を参照。
+同梱の ffmpeg が使えない場合は PATH、次に `SUPERCUT_FFMPEG` 環境変数にフォールバックする。
 
-=======
->>>>>>> 57aa2c36a71f8212440bb6a0404432b9981a5b44
 自分でビルドし直す場合:
 
 ```bash
-pip install pyinstaller
+pip install -r requirements.txt
+python tools/fetch_ffmpeg.py             # vendor/ffmpeg/ に ffmpeg.exe 等を取得（初回のみ）
 python -m PyInstaller supercut.spec --noconfirm --clean
 ```
 
@@ -81,11 +76,14 @@ python -m PyInstaller supercut.spec --noconfirm --clean
 
 | 設定 | 出力 | 起動（GUI が出るまで） |
 |---|---|---|
-| `ONEFILE = True`（既定） | exe 2 つだけ | **約 9 秒** |
-| `ONEFILE = False` | exe + `_internal\`（693 ファイル） | **約 2.5 秒** |
+| `ONEFILE = True`（既定） | exe 2 本（各 114 MB） | **約 10.4 秒** |
+| `ONEFILE = False` | フォルダ 306 MB（ffmpeg は 1 部だけ） | **約 2.5 秒** |
 
-単体 exe は起動のたびに中身を `%TEMP%` に展開するため、この PC の実測で **6 秒ほど遅い**
-（4 回平均: 8.95 秒 対 2.52 秒）。持ち運びやすさを取るか起動の速さを取るかで選ぶ。
+単体 exe は起動のたびに中身を `%TEMP%` に展開するため、同梱した ffmpeg（204 MB）が
+そのまま起動時間に乗る。フォルダ配布は展開が無いので同梱しても起動時間は変わらない
+（初回だけディスクから読むぶん遅く、実測 7.8 秒 → 2 回目以降 2.4 秒）。
+また単体 exe は 2 本が別々に ffmpeg を抱えるので、合計サイズでは不利になる。
+持ち運びやすさを取るか起動の速さを取るかで選ぶ。
 
 exe に埋め込むアイコン `assets/` は**リポジトリに含めていない**（`cooliocns SVG/` と同じ扱い）。
 `supercut.spec` が `assets/app.ico` を参照するので、**クローン直後は先にアイコンを生成する**:
@@ -355,5 +353,6 @@ python tools/test_gui_render.py            # GUI のスレッド配線を検証
 ## 必要環境
 
 - Windows / Python 3.11+
-- **ffmpeg**（PATH 上。`SUPERCUT_FFMPEG` で上書き可）
-- NVIDIA / AMD / Intel いずれかの GPU。無ければ libx264 に自動フォールバック
+- **ffmpeg**（exe 版は同梱済み。ソースから動かす場合は PATH 上に置くか
+  `SUPERCUT_FFMPEG` / `SUPERCUT_FFPROBE` で上書き）
+- NVIDIA / AMD / Intel いずれかの GPU。無ければ libx264/libx265 に自動フォールバック
