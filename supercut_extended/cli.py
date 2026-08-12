@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
 from .encoder import available_encoders, describe, pick_encoder
 from .library import LibraryError, matches_with_highlights, read_matches
 from .model import HIGHLIGHT_KINDS, Framing, Match, Media
@@ -322,6 +323,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="supercut", description="GPU-accelerated Supercut for Outplayed recordings"
     )
     ap.add_argument("--db", type=Path, help="override the Outplayed IndexedDB path")
+    # Worth having for its own sake, but the reason it exists is release checking:
+    # a one-file build compresses its payload, so the version cannot be read out of
+    # the .exe itself -- there was no way to confirm a built artifact was the version
+    # it claimed to be.
+    ap.add_argument("--version", action="version",
+                    version=f"Supercut Extended {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("encoders", help="show which encoders actually work here")
