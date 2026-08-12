@@ -11,10 +11,12 @@ to real footage, and gets a finished file back.
 
 from __future__ import annotations
 
+import copy
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QListWidget, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSlider,
@@ -86,10 +88,22 @@ class EditorWindow(QDialog):
         self.setWindowTitle(tr("editor.title"))
         self.setStyleSheet(build_style())
         self.setWindowIcon(icons.app_icon())
-        self.resize(1180, 940)
-        # A dialog that is not modal: the main window stays usable while editing.
+        # A dialog is fixed-ish by default: give it the full window frame so it can be
+        # maximised and snapped like any other window, plus a corner grip for fine
+        # resizing. The size is remembered, since the right size depends on the screen.
         self.setModal(False)
-        self.setWindowFlag(Qt.Window, True)
+        self.setWindowFlags(Qt.Window
+                            | Qt.WindowMinimizeButtonHint
+                            | Qt.WindowMaximizeButtonHint
+                            | Qt.WindowCloseButtonHint)
+        self.setSizeGripEnabled(True)
+        self.setMinimumSize(760, 520)
+        self._settings = QSettings("SupercutExtended", "editor")
+        geometry = self._settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        else:
+            self.resize(1180, 940)
 
         self._timeline = timeline
         self._limits = limits
@@ -99,6 +113,8 @@ class EditorWindow(QDialog):
         self._worker: TimelineWorker | None = None
         self._loading = False
         self._preview_index = -1
+        self._undo: list[tuple] = []
+        self._redo: list[tuple] = []
         self._loaded_source: Path | None = None
 
         self._build()
@@ -106,6 +122,8 @@ class EditorWindow(QDialog):
         self._refresh_list()
         self._sync_bgm_panel()
         self._refresh_summary()
+        self._bind_keys()
+        self._refresh_history()
 
     def _sync_bgm_panel(self) -> None:
         """Show the music the timeline already has, rather than assuming there is none.
@@ -147,6 +165,8 @@ class EditorWindow(QDialog):
         self.track.changed.connect(self._on_track_changed)
         self.track.selected.connect(self._on_select)
         self.track.scrubbed.connect(self._on_scrub)
+        self.track.split.connect(self._on_split)
+        self.track.aboutToChange.connect(self.push_undo)
         scroll = QScrollArea()
         scroll.setWidget(self.track)
         scroll.setWidgetResizable(True)
@@ -210,6 +230,7 @@ class EditorWindow(QDialog):
         lay.setSpacing(6)
         self.player = VideoPlayer()
         self.player.positionChanged.connect(self._on_position)
+        self.player.setMinimumHeight(140)
         lay.addWidget(self.player, 1)
         self.tc_label = QLabel("00:00.00 / 00:00.00")
         self.tc_label.setAlignment(Qt.AlignCenter)
@@ -299,6 +320,23 @@ class EditorWindow(QDialog):
     def _build_toolbar(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(6)
+        self.tool_select = QPushButton(tr("editor.tool_select"))
+        self.tool_cut = QPushButton(tr("editor.tool_cut"))
+        for btn, name in ((self.tool_select, "select"), (self.tool_cut, "cut")):
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _c, n=name: self._set_tool(n))
+            row.addWidget(btn)
+        self.tool_select.setChecked(True)
+
+        self.undo_btn = QPushButton(tr("editor.undo"))
+        self.undo_btn.clicked.connect(self.undo)
+        self.redo_btn = QPushButton(tr("editor.redo"))
+        self.redo_btn.clicked.connect(self.redo)
+        self.dup_btn = QPushButton(tr("editor.duplicate"))
+        self.dup_btn.clicked.connect(self._duplicate)
+        for b in (self.undo_btn, self.redo_btn, self.dup_btn):
+            row.addWidget(b)
+
         hint = QLabel(tr("editor.hint"))
         hint.setObjectName("captionLabel")
         row.addWidget(hint, 1)
@@ -314,6 +352,92 @@ class EditorWindow(QDialog):
         for b in (out_btn, in_btn, fit_btn):
             row.addWidget(b)
         return row
+
+    # -- tools, history -----------------------------------------------------
+    def _set_tool(self, name: str) -> None:
+        self.track.set_tool(name)
+        self.tool_select.setChecked(name == "select")
+        self.tool_cut.setChecked(name == "cut")
+
+    def _snapshot(self) -> tuple:
+        """Deep-copy the arrangement. Clips are mutable and edited in place, so a
+        shallow copy would age with the timeline and undo would restore nothing."""
+        return (copy.deepcopy(self._timeline.clips),
+                copy.deepcopy(self._timeline.bgm))
+
+    def push_undo(self) -> None:
+        self._undo.append(self._snapshot())
+        del self._undo[:-50]
+        self._redo.clear()
+        self._refresh_history()
+
+    def _restore(self, state: tuple) -> None:
+        clips, bgm = state
+        self._timeline.clips = clips
+        self._timeline.bgm = bgm
+        self.track.set_timeline(self._timeline, self._limits)
+        self._refresh_list()
+        self._sync_bgm_panel()
+        self._refresh_summary()
+        self._refresh_history()
+
+    def undo(self) -> None:
+        if not self._undo:
+            return
+        self._redo.append(self._snapshot())
+        self._restore(self._undo.pop())
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        self._undo.append(self._snapshot())
+        self._restore(self._redo.pop())
+
+    def _refresh_history(self) -> None:
+        self.undo_btn.setEnabled(bool(self._undo))
+        self.redo_btn.setEnabled(bool(self._redo))
+
+    def _on_split(self, index: int, at_ms: float) -> None:
+        """Razor: cut one clip into two at the pointer, keeping both halves usable."""
+        clips = self._timeline.clips
+        if not (0 <= index < len(clips)):
+            return
+        clip = clips[index]
+        if not (clip.source_start_ms + 200 < at_ms < clip.source_end_ms - 200):
+            return
+        self.push_undo()
+        tail = copy.deepcopy(clip)
+        tail.source_start_ms = at_ms
+        clip.source_end_ms = at_ms
+        clips.insert(index + 1, tail)
+        self.track.set_timeline(self._timeline, self._limits)
+        self.track.select(index + 1)
+        self._refresh_list()
+        self._refresh_summary()
+
+    def _duplicate(self) -> None:
+        i = self.track.selected_index()
+        if not (0 <= i < len(self._timeline.clips)):
+            return
+        self.push_undo()
+        self._timeline.clips.insert(i + 1, copy.deepcopy(self._timeline.clips[i]))
+        self.track.set_timeline(self._timeline, self._limits)
+        self.track.select(i + 1)
+        self._refresh_list()
+        self._refresh_summary()
+
+    def _bind_keys(self) -> None:
+        for keys, slot in (
+            ("Space", lambda: self.player.toggle()),
+            ("Ctrl+Z", self.undo),
+            ("Ctrl+Y", self.redo),
+            ("Ctrl+Shift+Z", self.redo),
+            ("Ctrl+D", self._duplicate),
+            ("Delete", self._remove_clip),
+            ("V", lambda: self._set_tool("select")),
+            ("C", lambda: self._set_tool("cut")),
+        ):
+            QShortcut(QKeySequence(keys), self, activated=slot)
 
     # -- clip editing -------------------------------------------------------
     def _current(self) -> Clip | None:
@@ -462,6 +586,7 @@ class EditorWindow(QDialog):
     def _remove_clip(self) -> None:
         i = self.track.selected_index()
         if 0 <= i < len(self._timeline.clips):
+            self.push_undo()
             del self._timeline.clips[i]
             self.track.set_timeline(self._timeline, self._limits)
             self._refresh_list()
@@ -568,6 +693,7 @@ class EditorWindow(QDialog):
             self._worker.cancel.set()
 
     def closeEvent(self, event) -> None:
+        self._settings.setValue("geometry", self.saveGeometry())
         self.player.stop()
         if self._worker:
             self._worker.cancel.set()

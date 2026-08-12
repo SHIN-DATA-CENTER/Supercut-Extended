@@ -122,6 +122,61 @@ def main() -> int:
             win._clear_bgm()
             expect(timeline.bgm is None, "music can be removed")
 
+            print("-- razor tool --")
+            win._set_tool("cut")
+            expect(track.tool() == "cut", "cut tool active", track.tool())
+            before = len(timeline.clips)
+            rects = dict(track._rects())
+            idx = 0
+            r = rects[idx]
+            span = timeline.clips[idx].duration_ms
+            # Press mid-clip: in cut mode that splits rather than starting a drag.
+            ev_x, ev_y = r.center().x(), r.center().y()
+            from PySide6.QtGui import QMouseEvent as _ME
+            track.mousePressEvent(_ME(_ME.Type.MouseButtonPress, QPointF(ev_x, ev_y),
+                                      Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+            expect(len(timeline.clips) == before + 1, "razor splits into two clips",
+                   f"{before} -> {len(timeline.clips)}")
+            halves = timeline.clips[idx].duration_ms + timeline.clips[idx + 1].duration_ms
+            expect(abs(halves - span) < 1.0, "the two halves add up to the original",
+                   f"{halves:.0f} vs {span:.0f}")
+            expect(track._mode == "", "razor did not start a drag", track._mode or "-")
+            win._set_tool("select")
+            expect(track.tool() == "select", "back to the selection tool")
+
+            print("-- undo / redo --")
+            n_after_split = len(timeline.clips)
+            win.undo()
+            expect(len(timeline.clips) == before, "undo reverses the split",
+                   f"{n_after_split} -> {len(timeline.clips)}")
+            win.redo()
+            expect(len(timeline.clips) == n_after_split, "redo re-applies it",
+                   str(len(timeline.clips)))
+            win.undo()
+
+            # Undo must restore values, not just counts -- clips are edited in place,
+            # so a shallow snapshot would silently "undo" to the current state.
+            win.track._index = 0
+            win._on_select(0)
+            original = timeline.clips[0].fade_in_ms
+            win.push_undo()
+            timeline.clips[0].fade_in_ms = 1234.0
+            win.undo()
+            expect(timeline.clips[0].fade_in_ms == original,
+                   "undo restores edited values, not just the clip count",
+                   f"{timeline.clips[0].fade_in_ms} vs {original}")
+
+            print("-- duplicate --")
+            win.track._index = 0
+            win._on_select(0)
+            n = len(timeline.clips)
+            win._duplicate()
+            expect(len(timeline.clips) == n + 1, "duplicate adds a copy",
+                   f"{n} -> {len(timeline.clips)}")
+            expect(timeline.clips[0].duration_ms == timeline.clips[1].duration_ms,
+                   "the copy matches the original")
+            win.undo()
+
             print("-- removal --")
             win.track._index = 0
             win._on_select(0)

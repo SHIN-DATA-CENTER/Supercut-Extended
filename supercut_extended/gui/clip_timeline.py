@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -54,6 +54,8 @@ class ClipTimelineWidget(QWidget):
     changed = Signal()                  # the timeline was mutated
     selected = Signal(int)              # clip index, or -1
     scrubbed = Signal(float)            # seconds into the whole sequence
+    split = Signal(int, float)          # clip index, ms into that clip's source
+    aboutToChange = Signal()            # a mutation is starting -- snapshot it
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -69,6 +71,29 @@ class ClipTimelineWidget(QWidget):
         self._insert_at = -1
         self._play_s = 0.0                        # playhead, in sequence seconds
         self._show_play = False
+        # While a clip is being dragged it is drawn as a floating copy that chases the
+        # cursor instead of snapping to it. The lag is what makes the drag read as
+        # picking the clip up rather than teleporting it.
+        self._ghost_x = 0.0                       # where the copy is drawn now
+        self._ghost_to = 0.0                      # where the cursor says it should be
+        self._ghost_lift = 0.0                    # 0..1, how far it has risen
+        self._grab_dx = 0.0                       # cursor offset inside the clip
+        self._tool = "select"                     # "select" or "cut"
+        self._cut_x: float | None = None
+        self._ease = QTimer(self)
+        self._ease.setInterval(16)
+        self._ease.timeout.connect(self._step_ghost)
+
+    def _step_ghost(self) -> None:
+        """Ease the floating copy toward the cursor, and settle it when it arrives."""
+        dragging = self._mode == "move"
+        target_lift = 1.0 if dragging else 0.0
+        self._ghost_x += (self._ghost_to - self._ghost_x) * 0.28
+        self._ghost_lift += (target_lift - self._ghost_lift) * 0.25
+        if not dragging and self._ghost_lift < 0.02:
+            self._ghost_lift = 0.0
+            self._ease.stop()
+        self.update()
 
     # -- data ---------------------------------------------------------------
     def set_timeline(self, timeline: Timeline, limits: dict[Path, float]) -> None:
@@ -78,6 +103,14 @@ class ClipTimelineWidget(QWidget):
         self._rescale()
         self.selected.emit(-1)
         self.update()
+
+    def set_tool(self, tool: str) -> None:
+        self._tool = tool
+        self.setCursor(Qt.CrossCursor if tool == "cut" else Qt.ArrowCursor)
+        self.update()
+
+    def tool(self) -> str:
+        return self._tool
 
     def selected_index(self) -> int:
         return self._index
@@ -166,7 +199,15 @@ class ClipTimelineWidget(QWidget):
             return
 
         for i, rect in self._rects():
+            if self._mode == "move" and i == self._index:
+                p.setPen(QPen(QColor(BORDER), 1, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(rect, 5, 5)
+                continue
             self._paint_clip(p, clips[i], rect, i == self._index)
+
+        if self._ghost_lift > 0.01 and 0 <= self._index < len(clips):
+            self._paint_ghost(p, clips[self._index])
 
         if self._mode == "move" and self._insert_at >= 0:
             x = float(HEADER_W)
@@ -179,6 +220,9 @@ class ClipTimelineWidget(QWidget):
             p.drawLine(x - 1, CLIP_TOP - 6, x - 1, BGM_TOP + BGM_H + 4)
 
         self._paint_bgm(p)
+        if self._tool == 'cut' and self._cut_x is not None:
+            p.setPen(QPen(QColor('#fbbf24'), 1, Qt.DashLine))
+            p.drawLine(self._cut_x, CLIP_TOP - 6, self._cut_x, CLIP_TOP + CLIP_H + 6)
         self._paint_playhead(p)
 
     def _paint_ruler(self, p: QPainter) -> None:
@@ -252,6 +296,34 @@ class ClipTimelineWidget(QWidget):
             p.drawLine(rect.left() + 4, rect.center().y(),
                        rect.right() - 4, rect.center().y())
 
+    def _paint_ghost(self, p: QPainter, clip) -> None:
+        """The clip being dragged, floating above the track under the cursor."""
+        pps = self._px_per_s()
+        w = max(6.0, clip.duration_s * pps)
+        lift = self._ghost_lift
+        rect = QRectF(self._ghost_x, CLIP_TOP - 10 * lift, w, CLIP_H)
+
+        p.save()
+        p.setOpacity(0.30 * lift)
+        shadow = QPainterPath()
+        shadow.addRoundedRect(rect.adjusted(3, 6, 3, 8), 6, 6)
+        p.fillPath(shadow, QColor("#000000"))
+        p.setOpacity(0.88 * lift)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, 6, 6)
+        p.fillPath(path, QColor(SURFACE_2).lighter(125))
+        cap = QPainterPath()
+        cap.addRoundedRect(QRectF(rect.left(), rect.top(), rect.width(), 5), 3, 3)
+        p.fillPath(cap, QColor(event_color(clip.event_kind or "")))
+        p.setPen(QPen(QColor(ACCENT_HI), 2))
+        p.drawPath(path)
+        if rect.width() > 40:
+            p.setPen(QColor(TEXT))
+            p.drawText(rect.adjusted(6, 9, -6, 0), Qt.AlignTop | Qt.AlignLeft,
+                       clip.label or (clip.event_kind or "clip"))
+        p.restore()
+
     def _paint_bgm(self, p: QPainter) -> None:
         total = max(1.0, self._timeline.duration_s)
         rect = QRectF(HEADER_W, BGM_TOP, total * self._px_per_s(), BGM_H)
@@ -288,6 +360,12 @@ class ClipTimelineWidget(QWidget):
         if event.button() != Qt.LeftButton:
             return
         index, mode = self._hit(event.position())
+        if self._tool == "cut" and index >= 0 and mode != "scrub":
+            rect = dict(self._rects())[index]
+            clip = self._timeline.clips[index]
+            into = (event.position().x() - rect.left()) / max(1.0, rect.width())
+            self.split.emit(index, clip.source_start_ms + into * clip.duration_ms)
+            return
         if mode == "scrub":
             self._mode = "scrub"
             self.scrubbed.emit(self._seconds_for_x(event.position().x()))
@@ -299,14 +377,26 @@ class ClipTimelineWidget(QWidget):
             self.update()
             return
         clip = self._timeline.clips[index]
+        self.aboutToChange.emit()
         self._mode = mode
         self._drag_from = event.position().x()
         self._drag_origin = (clip.source_start_ms, clip.source_end_ms)
         self._insert_at = index
+        if mode == "move":
+            rect = dict(self._rects())[index]
+            self._grab_dx = event.position().x() - rect.left()
+            self._ghost_x = self._ghost_to = rect.left()
+            self._ease.start()
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
         pos = event.position()
+        if self._tool == "cut":
+            i, mode = self._hit(pos)
+            self._cut_x = pos.x() if (i >= 0 and mode != "scrub") else None
+            self.update()
+            if not self._mode:
+                return
         if not self._mode:
             _i, mode = self._hit(pos)
             self.setCursor(Qt.SizeHorCursor if mode.startswith("trim")
@@ -331,6 +421,7 @@ class ClipTimelineWidget(QWidget):
                 limit, max(end0 + delta_ms, clip.source_start_ms + MIN_CLIP_MS))
         else:
             self._insert_at = self._slot_at(pos.x())
+            self._ghost_to = pos.x() - self._grab_dx
         self._rescale()
         self.update()
         if self._mode.startswith("trim"):
@@ -356,6 +447,12 @@ class ClipTimelineWidget(QWidget):
         self._mode = ""
         self._insert_at = -1
         self._rescale()
+        # Let the copy glide into its new home rather than vanishing mid-air.
+        if 0 <= self._index < len(self._timeline.clips):
+            landed = dict(self._rects()).get(self._index)
+            if landed is not None:
+                self._ghost_to = landed.left()
+                self._ease.start()
         self.update()
 
     def wheelEvent(self, event) -> None:
