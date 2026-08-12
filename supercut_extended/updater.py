@@ -97,6 +97,35 @@ def _api(url: str) -> dict | list | None:
         return None
 
 
+#: Substrings that mark a zip as something other than the application itself.
+#: Matched against the lowercased asset name.
+_NOT_THE_APP = ("cli", "source", "src", "debug", "symbols", "pdb")
+
+
+def _pick_asset(assets: list) -> dict | None:
+    """Choose the application archive from a release's attachments.
+
+    This used to take whichever zip came first, which was only ever correct because
+    exactly one zip is attached. Attach a second one -- a CLI-only archive, a
+    portable build alongside the folder build -- and the first-wins rule silently
+    picks by GitHub's ordering. A zip without SupercutExtended.exe in it makes
+    stage() raise, so the update fails at the very last step.
+
+    Preferring a name that does not look like a side archive costs nothing while a
+    single zip is attached, and stops that failure from ever being possible.
+    """
+    zips = [a for a in assets or []
+            if isinstance(a, dict)
+            and str(a.get("name") or "").lower().endswith(".zip")]
+    for asset in zips:
+        name = str(asset.get("name") or "").lower()
+        if not any(marker in name for marker in _NOT_THE_APP):
+            return asset
+    # Every candidate looks like a side archive: fall back rather than refuse to
+    # update, since the name heuristic is a guess and stage() validates for real.
+    return zips[0] if zips else None
+
+
 def fetch_latest() -> Release | None:
     """Return the newest published release, or None if unavailable/not newer."""
     if not enabled():
@@ -111,13 +140,11 @@ def fetch_latest() -> Release | None:
 
     asset_url = asset_name = None
     asset_size = 0
-    for asset in data.get("assets") or []:
-        name = str(asset.get("name") or "")
-        if name.lower().endswith(".zip"):
-            asset_url = asset.get("browser_download_url")
-            asset_name = name
-            asset_size = int(asset.get("size") or 0)
-            break
+    asset = _pick_asset(data.get("assets"))
+    if asset:
+        asset_url = asset.get("browser_download_url")
+        asset_name = str(asset.get("name") or "")
+        asset_size = int(asset.get("size") or 0)
 
     return Release(
         version=parse_version(tag),
@@ -210,16 +237,36 @@ def _staging_root(payload: Path) -> Path | None:
     return None
 
 
+#: The folder a PyInstaller one-folder build puts its runtime in. Everything under
+#: it belongs to the build and nothing else may live there, which is what makes it
+#: the only part of the install safe to delete stale files from.
+INTERNAL_DIR = "_internal"
+
+
 def apply_and_restart(payload: Path) -> None:
     """Hand the swap to a detached batch file, then the caller must exit.
 
     Windows keeps the running exe locked, so the copy has to happen after we are
-    gone. robocopy /E merges the new build over the old one; exit codes below 8 are
+    gone. robocopy merges the new build over the old one; exit codes below 8 are
     success in robocopy's unusual scheme.
 
-    The wait loop watches this process's own PID, but a one-file build also has a
-    bootloader parent that holds the .exe open until slightly after we exit. Retrying
-    for a few seconds (/R /W) rides out that window instead of failing the update.
+    The copy is split in two because the two halves of the install have opposite
+    rules. ``_internal`` is owned entirely by PyInstaller, so it is mirrored with
+    /PURGE: without that, a one-folder build accumulates every .pyd and Qt plugin
+    DLL that any past version ever shipped, and a stale plugin left behind across a
+    PySide6 bump is an import error or a duplicate-plugin crash at startup. The
+    install root is the opposite -- the user's own files can sit next to the exe --
+    so it keeps the plain /E merge and never purges. /XD keeps the root pass from
+    walking into the directory the first pass already handled.
+
+    The `if not exist` guard makes this a no-op for a one-file payload, so a build
+    of either shape can still update a machine of either shape.
+
+    The wait loop watches this process's own PID, but that is not the only handle on
+    disk: a one-file build has a bootloader parent that holds the .exe open until
+    slightly after we exit, and a one-folder build keeps every DLL under _internal
+    locked while it runs. Retrying for a few seconds (/R /W) rides out whichever of
+    those applies instead of failing the update.
     """
     target = app_dir()
     script = Path(tempfile.gettempdir()) / "supercut_apply_update.bat"
@@ -228,6 +275,17 @@ def apply_and_restart(payload: Path) -> None:
     # Skip the cleanup entirely rather than guess: leaving a temp directory behind is
     # a far smaller problem than deleting the wrong one.
     cleanup = (f'rmdir /s /q "{staging}" >nul 2>&1\r\n' if staging else "")
+
+    # Flat `goto` rather than a parenthesised block: `if errorlevel` inside a block
+    # reads correctly, but the surrounding block still expands variables at parse
+    # time, and that is the kind of batch subtlety that breaks on a later edit.
+    #
+    # The failure handler sits above the copies and is jumped over, so that
+    # `del "%~f0"` stays the last line of the file. cmd reads a batch script line by
+    # line from an open handle; anything after the script deletes itself is read from
+    # a file that is no longer there.
+    retry = "/R:10 /W:1"
+    quiet = "/NFL /NDL /NJH /NJS"
 
     script.write_text(
         "@echo off\r\n"
@@ -240,10 +298,20 @@ def apply_and_restart(payload: Path) -> None:
         f'  "%SystemRoot%\\System32\\timeout.exe" /t 1 /nobreak >nul\r\n'
         f'  goto wait\r\n'
         f')\r\n'
-        f'robocopy "{payload}" "{target}" /E /IS /IT /R:10 /W:1 /NFL /NDL /NJH /NJS >nul\r\n'
-        f'if errorlevel 8 (\r\n'
-        f'  echo Update failed. & pause & exit /b 1\r\n'
-        f')\r\n'
+        f'goto copy\r\n'
+        f':failed\r\n'
+        f'echo Update failed.\r\n'
+        f'pause\r\n'
+        f'exit /b 1\r\n'
+        f':copy\r\n'
+        f'if not exist "{payload}\\{INTERNAL_DIR}\\" goto rootcopy\r\n'
+        f'robocopy "{payload}\\{INTERNAL_DIR}" "{target}\\{INTERNAL_DIR}"'
+        f' /E /PURGE /IS /IT {retry} {quiet} >nul\r\n'
+        f'if errorlevel 8 goto failed\r\n'
+        f':rootcopy\r\n'
+        f'robocopy "{payload}" "{target}" /E /IS /IT /XD "{INTERNAL_DIR}"'
+        f' {retry} {quiet} >nul\r\n'
+        f'if errorlevel 8 goto failed\r\n'
         f'start "" "{exe}"\r\n'
         + cleanup +
         f'del "%~f0" >nul 2>&1\r\n',

@@ -20,6 +20,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -35,6 +36,51 @@ def expect(cond: bool, label: str, detail: str = "") -> None:
         failures.append(label)
 
 
+def contents(path: Path) -> str | None:
+    """None while the file is missing or locked.
+
+    robocopy replaces rather than rewrites, so there is a window where the target
+    does not exist. Reading straight through that window makes this test fail on
+    timing alone, which is exactly the kind of noise that gets a real failure
+    waved away later.
+    """
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
+def run_swap(install: Path, payload: Path, settled: Callable[[], bool]) -> None:
+    """Drive the real batch script against a fake install and wait for it to land.
+
+    apply_and_restart() targets app_dir() and waits on this process's PID. Point it
+    at the fake install, and give it a PID that is already gone so it proceeds at
+    once instead of waiting for this test to exit.
+    """
+    dead = subprocess.Popen(["cmd", "/c", "exit"])
+    dead.wait()
+    real_app_dir, real_getpid = updater.app_dir, os.getpid
+    updater.app_dir = lambda: install
+    os.getpid = lambda: dead.pid
+    try:
+        updater.apply_and_restart(payload)
+    finally:
+        updater.app_dir, os.getpid = real_app_dir, real_getpid
+
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        if settled():
+            break
+        time.sleep(0.5)
+
+
+def build_zip(path: Path, files: dict[str, str]) -> Path:
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, body in files.items():
+            zf.writestr(name, body)
+    return path
+
+
 def main() -> int:
     print("-- process creation flags --")
     # The bug itself, in isolation: this is what the dialog surfaced as WinError 87.
@@ -48,6 +94,25 @@ def main() -> int:
             expect(getattr(exc, "winerror", 0) == 87,
                    "the old flag pair really is what raised WinError 87",
                    f"winerror={getattr(exc, 'winerror', '?')}")
+
+    print("-- picking the asset out of a release --")
+    # First-zip-wins was only ever correct because exactly one zip is attached.
+    def asset(name: str) -> dict:
+        return {"name": name, "browser_download_url": f"https://x/{name}"}
+
+    expect(updater._pick_asset(
+        [asset("SupercutExtended-cli.zip"), asset("SupercutExtended.zip")]
+    )["name"] == "SupercutExtended.zip",
+        "the app archive wins even when a CLI archive is listed first")
+    expect(updater._pick_asset([asset("notes.txt"), asset("SupercutExtended.zip")])
+           ["name"] == "SupercutExtended.zip", "non-zip attachments are ignored")
+    expect(updater._pick_asset([asset("SupercutExtended.zip")])["name"]
+           == "SupercutExtended.zip", "the single-zip case still works")
+    expect(updater._pick_asset([asset("SupercutExtended-cli.zip")])["name"]
+           == "SupercutExtended-cli.zip",
+           "an only-looks-like-a-side-archive zip is still used, not refused")
+    expect(updater._pick_asset([]) is None, "a release with no assets gives None")
+    expect(updater._pick_asset(None) is None, "a missing assets list gives None")
 
     print("-- staging a zip --")
     work = Path(tempfile.mkdtemp(prefix="supercut_upd_test_"))
@@ -98,37 +163,8 @@ def main() -> int:
     (install / "SupercutExtended-cli.exe").write_text("OLD CLI")
     (install / "settings.local").write_text("keep me")
 
-    # apply_and_restart() targets app_dir() and waits on this process's PID. Point it
-    # at the fake install, and give it a PID that is already gone so it proceeds at
-    # once instead of waiting for this test to exit.
-    dead = subprocess.Popen(["cmd", "/c", "exit"])
-    dead.wait()
-    real_app_dir, real_getpid = updater.app_dir, os.getpid
-    updater.app_dir = lambda: install
-    os.getpid = lambda: dead.pid
-    try:
-        updater.apply_and_restart(payload)
-    finally:
-        updater.app_dir, os.getpid = real_app_dir, real_getpid
-
-    def contents(path: Path) -> str | None:
-        """None while the file is missing or locked.
-
-        robocopy replaces rather than rewrites, so there is a window where the target
-        does not exist. Reading straight through that window makes this test fail on
-        timing alone, which is exactly the kind of noise that gets a real failure
-        waved away later.
-        """
-        try:
-            return path.read_text()
-        except OSError:
-            return None
-
-    deadline = time.time() + 45
-    while time.time() < deadline:
-        if contents(install / updater.EXE_NAME) == "NEW BUILD":
-            break
-        time.sleep(0.5)
+    run_swap(install, payload,
+             lambda: contents(install / updater.EXE_NAME) == "NEW BUILD")
 
     expect(contents(install / updater.EXE_NAME) == "NEW BUILD",
            "the exe was actually replaced",
@@ -144,6 +180,64 @@ def main() -> int:
     expect(not payload.exists(), "the staging directory was cleaned up")
     expect(Path(tempfile.gettempdir()).is_dir(), "%TEMP% itself still exists")
     bystander.unlink(missing_ok=True)
+
+    print("-- one-folder build: _internal is mirrored, the root is not --")
+    # The whole point of the split copy. A one-folder build that only ever merges
+    # keeps every .pyd and Qt plugin any past version shipped; a stale plugin across
+    # a PySide6 bump is an import error at startup. _internal must lose the orphan,
+    # and the install root must NOT -- the user's own files live there.
+    onedir = work / "onedir_install"
+    (onedir / "_internal").mkdir(parents=True)
+    (onedir / updater.EXE_NAME).write_text("OLD BUILD")
+    (onedir / "_internal" / "shared.pyd").write_text("OLD PYD")
+    (onedir / "_internal" / "zzz_stale.pyd").write_text("ORPHAN FROM AN OLD VERSION")
+    (onedir / "_internal" / "plugins").mkdir()
+    (onedir / "_internal" / "plugins" / "gone.dll").write_text("ORPHAN IN A SUBDIR")
+    (onedir / "mysettings.txt").write_text("user file, must survive")
+
+    onedir_payload = updater.stage(build_zip(work / "onedir.zip", {
+        updater.EXE_NAME: "NEW BUILD",
+        "_internal/shared.pyd": "NEW PYD",
+        "_internal/added.pyd": "ADDED",
+    }))
+    run_swap(onedir, onedir_payload,
+             lambda: contents(onedir / updater.EXE_NAME) == "NEW BUILD"
+             and not (onedir / "_internal" / "zzz_stale.pyd").exists())
+
+    expect(contents(onedir / updater.EXE_NAME) == "NEW BUILD",
+           "the exe was replaced in a one-folder install")
+    expect(contents(onedir / "_internal" / "shared.pyd") == "NEW PYD",
+           "_internal files are updated")
+    expect((onedir / "_internal" / "added.pyd").is_file(),
+           "new _internal files arrive")
+    expect(not (onedir / "_internal" / "zzz_stale.pyd").exists(),
+           "a stale file in _internal is purged")
+    expect(not (onedir / "_internal" / "plugins" / "gone.dll").exists(),
+           "the purge reaches subdirectories of _internal")
+    expect(contents(onedir / "mysettings.txt") == "user file, must survive",
+           "a user file next to the exe is NOT purged (the root still merges)")
+
+    print("-- migrating a one-file install to a one-folder build --")
+    # What every existing v1.3.x user hits on the release that switches to onedir.
+    onefile = work / "onefile_install"
+    onefile.mkdir()
+    (onefile / updater.EXE_NAME).write_text("OLD BUILD")
+    (onefile / "SupercutExtended-cli.exe").write_text("OLD CLI")
+
+    migrate_payload = updater.stage(build_zip(work / "migrate.zip", {
+        f"SupercutExtended/{updater.EXE_NAME}": "NEW BUILD",
+        "SupercutExtended/SupercutExtended-cli.exe": "NEW CLI",
+        "SupercutExtended/_internal/base_library.zip": "RUNTIME",
+    }))
+    run_swap(onefile, migrate_payload,
+             lambda: contents(onefile / updater.EXE_NAME) == "NEW BUILD")
+
+    expect(contents(onefile / updater.EXE_NAME) == "NEW BUILD",
+           "a one-file install takes a one-folder payload")
+    expect((onefile / "_internal" / "base_library.zip").is_file(),
+           "_internal is created where there was none")
+    expect(contents(onefile / "SupercutExtended-cli.exe") == "NEW CLI",
+           "the old one-file CLI exe is overwritten, not orphaned")
 
     print("\n" + ("updater OK" if not failures
                   else f"{len(failures)} CHECK(S) FAILED: {failures}"))
