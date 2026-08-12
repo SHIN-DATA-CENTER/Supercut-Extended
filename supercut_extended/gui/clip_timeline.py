@@ -21,7 +21,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QWidget
 
 from ..model import Timeline
 from .style import ACCENT, ACCENT_HI, BORDER, SURFACE, SURFACE_2, TEXT, TEXT_DIM
@@ -455,9 +455,27 @@ class ClipTimelineWidget(QWidget):
                 self._ease.start()
         self.update()
 
+    def _scroller(self):
+        """The scroll area this track lives in, if any."""
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, QAbstractScrollArea):
+            w = w.parentWidget()
+        return w
+
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.ControlModifier:
             self.set_zoom(self._zoom * (1.15 if event.angleDelta().y() > 0 else 0.87))
             event.accept()
-        else:
-            event.ignore()
+            return
+        if event.modifiers() & Qt.AltModifier:
+            # Pan along the sequence. A wheel only reports vertical movement, and the
+            # track is far wider than it is tall, so the useful axis has to be asked
+            # for explicitly.
+            area = self._scroller()
+            if area is not None:
+                bar = area.horizontalScrollBar()
+                delta = event.angleDelta().y() or event.angleDelta().x()
+                bar.setValue(bar.value() - delta)
+                event.accept()
+                return
+        event.ignore()

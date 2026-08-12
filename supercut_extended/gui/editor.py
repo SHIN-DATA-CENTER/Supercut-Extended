@@ -244,6 +244,11 @@ class EditorWindow(QDialog):
         # Same framing the render will use, so the monitor is the output frame rather
         # than the raw recording -- black bars included or removed exactly as written.
         self.player.set_framing(self._options.framing)
+        # The readout and the scrubber follow the SEQUENCE, not the recording. A
+        # montage is a few minutes cut out of a half-hour capture, and showing the
+        # capture's clock made the montage's own length unreadable.
+        self.player.time_map = self._preview_time
+        self.player.seek_map = self._on_scrub
         lay.addWidget(self.player, 1)
         self.tc_label = QLabel("00:00.00 / 00:00.00")
         self.tc_label.setAlignment(Qt.AlignCenter)
@@ -393,11 +398,11 @@ class EditorWindow(QDialog):
         hint.setObjectName("captionLabel")
         row.addWidget(hint, 1)
         row.addWidget(_field_label(tr("editor.zoom")))
-        out_btn = QPushButton("\u2212")
-        out_btn.setFixedWidth(34)
+        # Glyphs, not the characters "-" and "+": at 34px the bare text rendered as a
+        # dash and a cross small enough to be unreadable next to the icon buttons.
+        out_btn = self._tool_button("Edit/Remove_Minus", tr("editor.zoom_out"), False)
         out_btn.clicked.connect(lambda: self.track.set_zoom(self.track.zoom() * 0.8))
-        in_btn = QPushButton("+")
-        in_btn.setFixedWidth(34)
+        in_btn = self._tool_button("Edit/Add_Plus", tr("editor.zoom_in"), False)
         in_btn.clicked.connect(lambda: self.track.set_zoom(self.track.zoom() * 1.25))
         fit_btn = QPushButton(tr("editor.fit"))
         fit_btn.clicked.connect(self.track.fit)
@@ -554,6 +559,15 @@ class EditorWindow(QDialog):
             return
         self.track.select(row)
 
+    def _preview_time(self, source_seconds: float) -> tuple[float, float]:
+        """Where we are in the montage, and how long the montage is."""
+        i = self._preview_index
+        clips = self._timeline.clips
+        total = self._timeline.duration_s
+        if not (0 <= i < len(clips)):
+            return 0.0, total
+        return min(total, self._sequence_seconds(i, source_seconds)), total
+
     def _sequence_seconds(self, index: int, source_seconds: float) -> float:
         clip = self._timeline.clips[index]
         return self._timeline.start_of(index) + max(0.0, source_seconds - clip.start_s)
@@ -581,8 +595,12 @@ class EditorWindow(QDialog):
             if clips[j].enabled and clips[j].duration_ms > 0:
                 self._cue(j)
                 return
-        self.player.stop()
-        self.track.set_playhead_seconds(self._timeline.duration_s, visible=False)
+        # Pause, never stop: stop() drops the source, which blanks the monitor and
+        # leaves _loaded_source pointing at a file the player no longer has -- so
+        # _cue() then decides there is nothing to reload and every later clip
+        # silently refuses to play.
+        self.player.pause()
+        self.track.set_playhead_seconds(self._timeline.duration_s)
 
     def _on_select(self, index: int) -> None:
         if index >= 0:

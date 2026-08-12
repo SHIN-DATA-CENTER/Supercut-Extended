@@ -122,6 +122,39 @@ def main() -> int:
             win._clear_bgm()
             expect(timeline.bgm is None, "music can be removed")
 
+            print("-- reaching the end of the sequence --")
+            # Playing to the end used to call player.stop(), which drops the source.
+            # After that _loaded_source still named the file, so _cue() decided there
+            # was nothing to reload and every clip silently refused to play.
+            last = len(timeline.clips) - 1
+            win._cue(last)
+            win._preview_index = last
+            end_s = timeline.clips[last].source_end_ms / 1000.0
+            win._on_position(end_s + 1.0)
+            expect(not win.player.player.source().isEmpty(),
+                   "the media is still loaded after the sequence ends",
+                   win.player.player.source().toString()[-28:] or "(empty)")
+            expect(win._loaded_source is not None,
+                   "the editor still believes a file is loaded")
+            win._cue(0)
+            expect(win._preview_index == 0,
+                   "a clip can still be cued after the end was reached")
+
+            print("-- the readout follows the montage, not the recording --")
+            expect(win.player.time_map is not None, "the player asks the editor for time")
+            expect(win.player.seek_map is not None, "and hands seeking back to it")
+            win._preview_index = 1
+            clip = timeline.clips[1]
+            pos, dur = win._preview_time(clip.start_s + 1.0)
+            expect(abs(dur - timeline.duration_s) < 0.01,
+                   "the duration shown is the montage's",
+                   f"{dur:.2f}s vs sequence {timeline.duration_s:.2f}s")
+            expect(abs(pos - (timeline.start_of(1) + 1.0)) < 0.01,
+                   "the position shown is where we are in the montage",
+                   f"{pos:.2f}s")
+            expect(dur < 60_000, "not the 60s dummy recording's own length",
+                   f"{dur:.2f}s")
+
             print("-- tool palette --")
             for name, btn in (("select", win.tool_select), ("cut", win.tool_cut),
                               ("duplicate", win.dup_btn), ("delete", win.del_btn)):

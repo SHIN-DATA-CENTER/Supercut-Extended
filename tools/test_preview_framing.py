@@ -165,6 +165,23 @@ def main() -> int:
     expect(not (outside.red() < 20 and outside.green() < 20 and outside.blue() < 20),
            "the leftover is not black")
 
+    print("-- the cropped-off part must not spill outside the frame --")
+    # setSceneRect only decides what is scrolled to, not what is painted. A crop moves
+    # the video item to a negative offset, so the bars being cropped away carried on
+    # being drawn beside the frame and came back as soon as the widget was wider.
+    player.set_framing(Framing(crop_left=240, crop_right=240))
+    player.resize(1100, 300)
+    settle(600)
+    shot = player.grab().toImage()
+    frame = view.mapFromScene(view._scene.sceneRect()).boundingRect()
+    expect(frame.left() > 6, "there is room beside the frame to spill into",
+           f"frame starts at x={frame.left()} of {view.width()}")
+    beside = view.mapTo(player, QPoint(max(0, frame.left() - 5), view.height() // 2))
+    spill = QImage.pixelColor(shot, beside.x(), beside.y())
+    expect(spill.blue() > 100 and spill.red() < 90,
+           "beside the frame is still the parent background",
+           f"rgb({spill.red()},{spill.green()},{spill.blue()})")
+
     print("-- padding that WILL be encoded is still shown black --")
     player.set_framing(Framing(width=1920, height=1080, crop_left=240, crop_right=240))
     settle(600)

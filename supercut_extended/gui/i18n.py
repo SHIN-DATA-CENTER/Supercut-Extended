@@ -157,7 +157,10 @@ STRINGS: dict[str, dict[str, str]] = {
 
         "editor.title": "クリップ編集",
         "editor.open": "編集画面を開く",
-        "editor.hint": "Space=再生 / Ctrl+Z=元に戻す / Del=削除 / ルーラーをドラッグ=再生位置",
+        "editor.hint": "Space=再生 / Ctrl+Z=元に戻す / Del=削除 / ルーラーをドラッグ=再生位置 / "
+                       "Ctrl+ホイール=拡大縮小 / Alt+ホイール=左右に移動",
+        "editor.zoom_in": "拡大",
+        "editor.zoom_out": "縮小",
         "editor.noselection": "クリップを選択してください",
         "editor.enabled": "使用する",
         "editor.fade_in": "フェードイン",
@@ -357,7 +360,10 @@ STRINGS: dict[str, dict[str, str]] = {
 
         "editor.title": "Clip editor",
         "editor.open": "Open editor",
-        "editor.hint": "Space=play / Ctrl+Z=undo / Del=remove / drag the ruler to scrub",
+        "editor.hint": "Space=play / Ctrl+Z=undo / Del=remove / drag the ruler to scrub / "
+                       "Ctrl+wheel=zoom / Alt+wheel=pan",
+        "editor.zoom_in": "Zoom in",
+        "editor.zoom_out": "Zoom out",
         "editor.noselection": "Select a clip",
         "editor.enabled": "Include",
         "editor.fade_in": "Fade in",

@@ -21,8 +21,8 @@ from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QTransform
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
-    QFrame, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QPushButton,
-    QSizePolicy, QSlider, QVBoxLayout, QWidget,
+    QFrame, QGraphicsItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
+    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ..model import Framing
@@ -77,10 +77,20 @@ class FramedVideoView(QGraphicsView):
             QRectF(0, 0, 16, 9), QPen(Qt.NoPen), QBrush(QColor("#000000")))
         self._backdrop.setZValue(-10)
 
+        # The video hangs off a clipping parent rather than sitting in the scene.
+        # setSceneRect only decides what is *scrolled to*, not what is painted: a
+        # cropped source is positioned with a negative offset, so the part being
+        # cropped away carried on being drawn outside the frame and reappeared as
+        # black bars whenever the widget was wider than the output.
+        self._clip = self._scene.addRect(
+            QRectF(0, 0, 16, 9), QPen(Qt.NoPen), QBrush(Qt.NoBrush))
+        self._clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape,
+                           True)
+
         self.item = QGraphicsVideoItem()
         # The item's rect is driven directly, so it must not letterbox inside itself.
         self.item.setAspectRatioMode(Qt.IgnoreAspectRatio)
-        self._scene.addItem(self.item)
+        self.item.setParentItem(self._clip)
 
         # A hairline marking the output frame, shown only when framing is actually
         # doing something -- otherwise it would just trace the edge of the picture.
@@ -135,6 +145,7 @@ class FramedVideoView(QGraphicsView):
 
         frame = QRectF(0, 0, ow, oh)
         self._backdrop.setRect(frame)
+        self._clip.setRect(frame)
         self._edge.setRect(frame)
         self._edge.setVisible(fr.active)
         self._scene.setSceneRect(frame)
@@ -306,6 +317,14 @@ class VideoPlayer(QWidget):
         super().__init__(parent)
         self._duration_s = 0.0
         self._prime = False
+        # Optional hooks so a caller whose real timeline is not the source file can
+        # own what the readout and the scrubber mean. The editor uses them: its
+        # sequence is 5 minutes cut out of a 33 minute recording, and showing the
+        # recording's clock made the montage's own length impossible to read.
+        #   time_map(source_seconds) -> (position, duration) to display
+        #   seek_map(position)       -> caller handles the seek
+        self.time_map = None
+        self.seek_map = None
 
         self.video = FramedVideoView()
         self.video.setMinimumHeight(300)
@@ -344,7 +363,7 @@ class VideoPlayer(QWidget):
         # (main_window wires timeline.seekRequested straight to player.seek), and an
         # attribute of the same name would silently replace it.
         self.seek_bar = SeekBar()
-        self.seek_bar.seeked.connect(self.seek)
+        self.seek_bar.seeked.connect(self._on_seek_requested)
 
         self.volume_icon = QLabel()
         self.volume_icon.setPixmap(icons.pixmap("Media/Volume_Max", TEXT_DIM, 18))
@@ -450,21 +469,43 @@ class VideoPlayer(QWidget):
     def seek(self, seconds: float) -> None:
         self.player.setPosition(int(max(0.0, seconds) * 1000))
 
+    def pause(self) -> None:
+        """Stop advancing but keep the media loaded.
+
+        Distinct from stop(), which drops the source: after that the widget goes black
+        and nothing can be played again until something reloads it.
+        """
+        self.player.pause()
+
+    def _on_seek_requested(self, seconds: float) -> None:
+        if self.seek_map is not None:
+            self.seek_map(seconds)
+        else:
+            self.seek(seconds)
+
+    def _displayed(self, source_seconds: float) -> tuple[float, float]:
+        if self.time_map is not None:
+            return self.time_map(source_seconds)
+        return source_seconds, self._duration_s
+
     def position_s(self) -> float:
         return self.player.position() / 1000.0
 
     # -- signals ------------------------------------------------------------
+    def _refresh_readout(self, source_seconds: float) -> None:
+        position, duration = self._displayed(source_seconds)
+        self.time_label.setText(f"{fmt_time(position)} / {fmt_time(duration)}")
+        self.seek_bar.set_duration(duration)
+        self.seek_bar.set_position(position)
+
     def _on_position(self, ms: int) -> None:
         secs = ms / 1000.0
-        self.time_label.setText(f"{fmt_time(secs)} / {fmt_time(self._duration_s)}")
-        self.seek_bar.set_position(secs)
+        self._refresh_readout(secs)
         self.positionChanged.emit(secs)
 
     def _on_duration(self, ms: int) -> None:
         self._duration_s = ms / 1000.0
-        self.time_label.setText(
-            f"{fmt_time(self.position_s())} / {fmt_time(self._duration_s)}")
-        self.seek_bar.set_duration(self._duration_s)
+        self._refresh_readout(self.position_s())
         self.durationChanged.emit(self._duration_s)
 
     def _on_state(self, state) -> None:
