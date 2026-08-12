@@ -47,14 +47,19 @@ Outplayed は録画も手動エクスポートも既に GPU を使っている�
 **`SupercutExtended.exe`** を起動するだけ。
 ※前提としてOutPlayedを利用していること。
 
+zip を展開すると `SupercutExtended` フォルダが出てくる。中身は:
+
 | ファイル | 大きさ | 用途 |
 |---|---|---|
-| `SupercutExtended.exe` | 114 MB | GUI 本体 |
-| `SupercutExtended-cli.exe` | 114 MB | コマンドライン版（`... list` など） |
+| `SupercutExtended.exe` | 2.5 MB | GUI 本体 |
+| `SupercutExtended-cli.exe` | 2.5 MB | コマンドライン版（`... list` など） |
+| `_internal\` | 299 MB | Python・PySide6・**ffmpeg 本体**。2 つの exe が共有する |
 
-**それぞれ 1 ファイルで完結している。** Python も PySide6 も、**ffmpeg 本体も** exe の中に
-入っているので、インストールも、隣に置くフォルダも要らない。どこにコピーしても単体で動く。
-2 つは独立しているので、GUI しか使わないなら `SupercutExtended.exe` だけ持っていけばよい。
+**フォルダごと 1 セットで扱うこと。** インストールは不要で、フォルダごとどこに置いても動くが、
+`_internal\` を置いていくと exe だけでは起動しない。移動やコピーはフォルダ単位で行う。
+
+v1.3.2 までは exe 1 本ずつに全部入りだった（各 114 MB）。フォルダ形式にしたのは、
+起動が **9.3 秒 → 2.0 秒**、配布 zip が **228 MB → 120 MB** になるため（下の比較表を参照）。
 
 同梱している ffmpeg は gyan.dev の `ffmpeg-8.1.2-essentials_build`（**GPLv3**）。
 libx264 / libx265 / NVENC / AMD AMF / Intel QSV の H.264・HEVC が全部有効な、
@@ -72,18 +77,25 @@ python -m PyInstaller supercut.spec --noconfirm --clean
 
 #### 単体 exe とフォルダ配布の切り替え
 
-`supercut.spec` 冒頭の `ONEFILE` で出力の形を切り替えられる。
+`supercut.spec` 冒頭の `ONEFILE` で出力の形を切り替えられる。同じソース・同じ PC での実測:
 
-| 設定 | 出力 | 起動（GUI が出るまで） |
+| | `ONEFILE = True` | `ONEFILE = False`（既定） |
 |---|---|---|
-| `ONEFILE = True`（既定） | exe 2 本（各 114 MB） | **約 10.4 秒** |
-| `ONEFILE = False` | フォルダ 306 MB（ffmpeg は 1 部だけ） | **約 2.5 秒** |
+| 出力 | exe 2 本（各 114.3 MB） | フォルダ 303.9 MB / 701 ファイル |
+| exe 本体 | 114.3 MB × 2 | 2.5 MB × 2 ＋ 共有の `_internal\` |
+| 同梱 ffmpeg | **2 部**（exe ごとに 1 部） | **1 部** |
+| 配布 zip | 227.7 MB | **120.4 MB** |
+| 起動・初回 | 9.3 秒 | 6.1 秒 |
+| 起動・2 回目以降 | 9.3 秒 | **2.0 秒** |
 
-単体 exe は起動のたびに中身を `%TEMP%` に展開するため、同梱した ffmpeg（204 MB）が
-そのまま起動時間に乗る。フォルダ配布は展開が無いので同梱しても起動時間は変わらない
-（初回だけディスクから読むぶん遅く、実測 7.8 秒 → 2 回目以降 2.4 秒）。
-また単体 exe は 2 本が別々に ffmpeg を抱えるので、合計サイズでは不利になる。
-持ち運びやすさを取るか起動の速さを取るかで選ぶ。
+単体 exe は起動のたびに中身を `%TEMP%` へ展開するので、同梱した ffmpeg（204 MB）が
+そのまま毎回の起動時間に乗る。**何回起動しても速くならない**のはこのため。
+フォルダ配布は展開が無いぶん、OS のファイルキャッシュが効いて 2 回目以降が一気に速い。
+
+zip が半分近くまで小さくなるのは、単体 exe の中身が**既に圧縮済み**で zip がほとんど
+効かないのに対し、フォルダ配布は生のファイルなので普通に圧縮できるから。
+展開後のサイズは単体 exe 2 本（228.6 MB）よりフォルダ（303.9 MB）のほうが大きいが、
+これは PySide6 等の共有分よりも「ffmpeg を 2 部持たない」効果が効く前の素の差。
 
 exe に埋め込むアイコン `assets/` は**リポジトリに含めていない**（`cooliocns SVG/` と同じ扱い）。
 `supercut.spec` が `assets/app.ico` を参照するので、**クローン直後は先にアイコンを生成する**:

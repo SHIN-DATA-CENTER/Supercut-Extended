@@ -19,7 +19,7 @@ ONEFILE controls the output shape:
            to be kept together.
 """
 
-ONEFILE = True
+ONEFILE = False
 
 import os
 
