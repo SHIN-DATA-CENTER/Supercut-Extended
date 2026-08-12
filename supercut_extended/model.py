@@ -309,6 +309,9 @@ class Timeline:
     """The edited sequence: clips in play order, plus an optional music bed."""
 
     clips: list[Clip] = field(default_factory=list)
+    # Level for the footage's own audio, as a linear multiplier. Separate from the
+    # BGM's own level so the two can be balanced against each other.
+    video_volume: float = 1.0
     bgm: Bgm | None = None
     # Fades applied to the montage as a whole, on top of any per-clip fades.
     fade_in_ms: float = 0.0
@@ -362,5 +365,8 @@ class Timeline:
         untouched, so there is nothing to fade or mix into.
         """
         if self.bgm is not None or self.fade_in_ms or self.fade_out_ms:
+            return True
+        # A level change is a filter too, and filters need a real encode.
+        if abs(self.video_volume - 1.0) > 1e-3:
             return True
         return any(c.fade_in_ms or c.fade_out_ms for c in self.active)

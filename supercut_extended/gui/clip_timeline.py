@@ -29,7 +29,7 @@ from .timeline import event_color
 
 EDGE_GRAB = 7           # px from a clip border that starts a trim instead of a move
 MIN_CLIP_MS = 200.0     # never let a trim collapse a clip to nothing
-HEADER_W = 64           # track-name column down the left
+HEADER_W = 132          # track-name column down the left, with its level bar
 RULER_H = 24
 CLIP_TOP = RULER_H + 10
 CLIP_H = 74
@@ -56,6 +56,7 @@ class ClipTimelineWidget(QWidget):
     scrubbed = Signal(float)            # seconds into the whole sequence
     split = Signal(int, float)          # clip index, ms into that clip's source
     aboutToChange = Signal()            # a mutation is starting -- snapshot it
+    volumeChanged = Signal(str, float)  # "v1" or "bgm", 0..1
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -83,6 +84,11 @@ class ClipTimelineWidget(QWidget):
         self._ease = QTimer(self)
         self._ease.setInterval(16)
         self._ease.timeout.connect(self._step_ghost)
+
+    def _apply_volume(self, track: str, x: float) -> None:
+        rect = self._vol_rect(track)
+        frac = (x - rect.left()) / max(1.0, rect.width())
+        self._set_volume(track, frac)
 
     def _step_ghost(self) -> None:
         """Ease the floating copy toward the cursor, and settle it when it arrives."""
@@ -302,16 +308,72 @@ class ClipTimelineWidget(QWidget):
             p.drawLine(half, RULER_H - 3, half, RULER_H)
             t += step
 
+    def _scroll_x(self) -> float:
+        """How far the track has been scrolled, so the headers can be pinned."""
+        area = self._scroller()
+        return float(area.horizontalScrollBar().value()) if area is not None else 0.0
+
+    def _vol_rect(self, track: str, offset: float | None = None) -> QRectF:
+        """The level bar for a track header, in widget coordinates."""
+        x = self._scroll_x() if offset is None else offset
+        top = (CLIP_TOP + CLIP_H - 26) if track == "v1" else (BGM_TOP + BGM_H - 22)
+        return QRectF(x + 10, top, HEADER_W - 20, 6)
+
+    def volume_of(self, track: str) -> float:
+        if track == "bgm":
+            return self._timeline.bgm.volume if self._timeline.bgm else 0.0
+        return self._timeline.video_volume
+
+    def _set_volume(self, track: str, value: float) -> None:
+        value = max(0.0, min(1.0, value))
+        if track == "bgm":
+            if self._timeline.bgm is None:
+                return
+            self._timeline.bgm.volume = value
+        else:
+            self._timeline.video_volume = value
+        self.volumeChanged.emit(track, value)
+        self.update()
+
     def _paint_headers(self, p: QPainter) -> None:
-        p.fillRect(QRectF(0, RULER_H, HEADER_W, self.height() - RULER_H),
+        # Drawn at the scroll offset so the column stays put while the track slides
+        # underneath it -- the labels used to scroll away with the clips.
+        x = self._scroll_x()
+        p.fillRect(QRectF(x, RULER_H, HEADER_W, self.height() - RULER_H),
                    QColor(SURFACE_2))
         p.setPen(QPen(QColor(BORDER), 1))
-        p.drawLine(HEADER_W, RULER_H, HEADER_W, self.height())
-        p.setPen(QColor(TEXT_DIM))
-        p.drawText(QRectF(0, CLIP_TOP, HEADER_W - 8, CLIP_H),
-                   Qt.AlignVCenter | Qt.AlignRight, "V1")
-        p.drawText(QRectF(0, BGM_TOP, HEADER_W - 8, BGM_H),
-                   Qt.AlignVCenter | Qt.AlignRight, "BGM")
+        p.drawLine(QPointF(x + HEADER_W, RULER_H),
+                   QPointF(x + HEADER_W, self.height()))
+        p.setPen(QColor(TEXT))
+        p.drawText(QRectF(x + 10, CLIP_TOP + 6, HEADER_W - 20, 16),
+                   Qt.AlignVCenter | Qt.AlignLeft, "V1")
+        p.drawText(QRectF(x + 10, BGM_TOP + 2, HEADER_W - 20, 14),
+                   Qt.AlignVCenter | Qt.AlignLeft, "BGM")
+
+        self._paint_level(p, "v1", x, self._timeline.video_volume, True)
+        has_bgm = self._timeline.bgm is not None
+        self._paint_level(p, "bgm", x,
+                          self._timeline.bgm.volume if has_bgm else 0.0, has_bgm)
+
+    def _paint_level(self, p: QPainter, track: str, offset: float,
+                     value: float, enabled: bool) -> None:
+        rect = self._vol_rect(track, offset)
+        radius = rect.height() / 2.0
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2a3346"))
+        p.drawRoundedRect(rect, radius, radius)
+        if enabled and value > 0:
+            filled = QRectF(rect)
+            filled.setWidth(rect.width() * value)
+            p.setBrush(QColor(ACCENT if track == "v1" else "#a78bfa"))
+            p.drawRoundedRect(filled, radius, radius)
+            knob = rect.left() + rect.width() * value
+            p.setBrush(QColor(ACCENT_HI if track == "v1" else "#c4b5fd"))
+            p.drawEllipse(QPointF(knob, rect.center().y()), 4.5, 4.5)
+        p.setPen(QColor(TEXT_DIM if enabled else "#4b5563"))
+        p.drawText(QRectF(rect.left(), rect.top() - 16, rect.width(), 14),
+                   Qt.AlignVCenter | Qt.AlignRight,
+                   f"{value * 100:.0f}%" if enabled else "--")
 
     def _paint_clip(self, p: QPainter, clip, rect: QRectF, selected: bool) -> None:
         colour = QColor(event_color(clip.event_kind or ""))
@@ -411,8 +473,31 @@ class ClipTimelineWidget(QWidget):
         p.fillPath(head, QColor(PLAYHEAD))
 
     # -- interaction --------------------------------------------------------
+    def _header_hit(self, pos) -> str | None:
+        """Which track's level bar is under the pointer, if any.
+
+        Tested against the *pinned* header, not x < HEADER_W: once the track is
+        scrolled the header floats over the clips, and a click there has to reach the
+        level bar rather than the clip hidden beneath it.
+        """
+        x = self._scroll_x()
+        if pos.x() > x + HEADER_W or pos.y() < RULER_H:
+            return None
+        for track in ("v1", "bgm"):
+            if self._vol_rect(track, x).adjusted(-6, -9, 6, 9).contains(pos):
+                return track
+        return "header"          # in the column, but not on a bar
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
+            return
+        hit = self._header_hit(event.position())
+        if hit is not None:
+            if hit in ("v1", "bgm"):
+                self._mode = f"vol-{hit}"
+                self._apply_volume(hit, event.position().x())
+            else:
+                self._mode = ""
             return
         index, mode = self._hit(event.position())
         if self._tool == "cut" and index >= 0 and mode != "scrub":
@@ -446,6 +531,9 @@ class ClipTimelineWidget(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         pos = event.position()
+        if self._mode.startswith("vol-"):
+            self._apply_volume(self._mode[4:], pos.x())
+            return
         if self._tool == "cut":
             i, mode = self._hit(pos)
             self._cut_x = pos.x() if (i >= 0 and mode != "scrub") else None
@@ -493,6 +581,9 @@ class ClipTimelineWidget(QWidget):
         return len(self._timeline.clips) - 1
 
     def mouseReleaseEvent(self, _event) -> None:
+        if self._mode.startswith("vol-"):
+            self._mode = ""
+            return
         if self._mode == "move" and 0 <= self._insert_at < len(self._timeline.clips):
             if self._insert_at != self._index:
                 self._timeline.move(self._index, self._insert_at)

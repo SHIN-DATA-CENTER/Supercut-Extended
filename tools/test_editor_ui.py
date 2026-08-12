@@ -185,6 +185,66 @@ def main() -> int:
             expect(dur < 60_000, "not the 60s dummy recording's own length",
                    f"{dur:.2f}s")
 
+            print("-- track headers stay put when the track scrolls --")
+            from supercut_extended.gui.clip_timeline import HEADER_W
+            area = track._scroller()
+            expect(area is not None, "the track knows which scroll area holds it")
+            bar = area.horizontalScrollBar()
+            bar.setMaximum(500)
+            for offset in (0, 250):
+                bar.setValue(offset)
+                expect(abs(track._scroll_x() - offset) < 0.51,
+                       f"header follows the scroll to {offset}px",
+                       f"{track._scroll_x():.0f}")
+                rect = track._vol_rect("v1")
+                expect(offset <= rect.left() <= offset + HEADER_W,
+                       "the level bar stays inside the pinned column",
+                       f"x={rect.left():.0f} for offset {offset}")
+            bar.setValue(0)
+
+            print("-- V1 and BGM have their own level --")
+            timeline.bgm = Bgm(path=src, volume=0.4)
+            expect(abs(track.volume_of("v1") - 1.0) < 0.01,
+                   "the footage starts at full level", str(track.volume_of("v1")))
+            expect(abs(track.volume_of("bgm") - 0.4) < 0.01,
+                   "the music reports its own level", str(track.volume_of("bgm")))
+
+            v1 = track._vol_rect("v1")
+            track._set_volume("v1", 0.5)
+            expect(abs(timeline.video_volume - 0.5) < 0.01,
+                   "dragging the V1 bar sets the footage level",
+                   str(timeline.video_volume))
+            expect(abs(timeline.bgm.volume - 0.4) < 0.01,
+                   "and leaves the music alone", str(timeline.bgm.volume))
+            track._apply_volume("bgm", track._vol_rect("bgm").left())
+            expect(timeline.bgm.volume == 0.0, "the music can be pulled to silence",
+                   str(timeline.bgm.volume))
+            expect(abs(timeline.video_volume - 0.5) < 0.01,
+                   "which does not touch the footage", str(timeline.video_volume))
+            expect(abs(win.vol.value() / 100.0 - timeline.bgm.volume) < 0.02,
+                   "the inspector slider mirrors the track header",
+                   f"{win.vol.value()}%")
+
+            # A level change is a filter, so a stream copy cannot honour it. Checked on
+            # a timeline of its own: this one already carries a fade from earlier, which
+            # would force an encode regardless and hide whether the level did anything.
+            plain = Timeline(clips=[Clip(src, 0, 4000, "A")])
+            expect(not plain.needs_encode(),
+                   "a plain timeline can be stream-copied")
+            plain.video_volume = 0.5
+            expect(plain.needs_encode(), "a changed level forces a re-encode")
+            plain.video_volume = 1.0
+            expect(not plain.needs_encode(), "full level alone does not force one")
+            timeline.bgm = None
+
+            # Pressing on the header must not fall through to the clip beneath it.
+            bar.setValue(250)
+            hit = track._header_hit(QPointF(250 + 20, v1.center().y()))
+            expect(hit in ("v1", "header"),
+                   "a press on the pinned header is caught by the header",
+                   str(hit))
+            bar.setValue(0)
+
             print("-- tool palette --")
             for name, btn in (("select", win.tool_select), ("cut", win.tool_cut),
                               ("duplicate", win.dup_btn), ("delete", win.del_btn)):

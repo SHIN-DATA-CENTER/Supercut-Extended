@@ -48,6 +48,7 @@ class RenderOptions:
     keep_temp: bool = False
     framing: Framing = field(default_factory=Framing)
     fps: float | None = None  # None keeps whatever the source runs at
+    audio_volume: float = 1.0  # level for the footage's own audio
     mode: str = "encode"      # "encode" (Outplayed-equivalent) or "copy"
 
 
@@ -104,30 +105,41 @@ def _fade_chain(prefix: str, fade_in_s: float, fade_out_s: float,
 
 
 def _audio_args(mode: str, info: MediaInfo, *, fade_in_s: float = 0.0,
-                fade_out_s: float = 0.0, duration_s: float = 0.0) -> list[str]:
+                fade_out_s: float = 0.0, duration_s: float = 0.0,
+                volume: float = 1.0) -> list[str]:
     n = len(info.audio)
     if n == 0 or mode == "none":
         return ["-an"]
     fades = _fade_chain("afade", fade_in_s, fade_out_s, duration_s)
+    level = [] if abs(volume - 1.0) < 1e-3 else [f"volume={max(0.0, volume):.3f}"]
 
     if mode == "all":
         # Every track is mapped straight through, so there is no single stream to
         # hang a filter on. Fading each one would need a filter per track; the
         # montage-level fade in render_timeline covers the common case instead.
-        return ["-map", "0:a", "-c:a", "aac", "-b:a", "192k"]
+        if not level:
+            return ["-map", "0:a", "-c:a", "aac", "-b:a", "192k"]
+        # A level change does have to reach every track, so build one filter each.
+        parts = [f"[0:a:{i}]{level[0]}[a{i}]" for i in range(n)]
+        maps = []
+        for i in range(n):
+            maps += ["-map", f"[a{i}]"]
+        return (["-filter_complex", ";".join(parts)] + maps
+                + ["-c:a", "aac", "-b:a", "192k"])
 
     tail = ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
     if mode == "mix" and n > 1:
         inputs = "".join(f"[0:a:{i}]" for i in range(n))
         chain = f"{inputs}amix=inputs={n}:normalize=0"
-        if fades:
-            chain += "," + ",".join(fades)
+        for extra in (level + fades):
+            chain += "," + extra
         return ["-filter_complex", f"{chain}[aout]", "-map", "[aout]"] + tail
 
     index = 0 if mode == "mix" else _audio_index(mode, n)
     args = ["-map", f"0:a:{index}"]
-    if fades:
-        args += ["-af", ",".join(fades)]
+    chain = level + fades
+    if chain:
+        args += ["-af", ",".join(chain)]
     return args + tail
 
 
@@ -181,7 +193,7 @@ def _segment_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
     if chain:
         cmd += ["-vf", ",".join(chain)]
     cmd += _audio_args(opts.audio, info, fade_in_s=fade_in_s, fade_out_s=fade_out_s,
-                       duration_s=seg.duration_s)
+                       duration_s=seg.duration_s, volume=opts.audio_volume)
     cmd += video_args(opts.encoder, preset=opts.preset, quality=opts.quality,
                       max_rate_kbps=opts.max_rate_kbps,
                       hw_frames=hwaccel and bool(decode_args(opts.encoder)))
@@ -518,10 +530,14 @@ def render_timeline(
     output = Path(output)
 
     opts = options
+    # The timeline owns the footage level; carry it into the options the segment
+    # encoder actually reads.
+    if abs(timeline.video_volume - opts.audio_volume) > 1e-3:
+        opts = replace(opts, audio_volume=timeline.video_volume)
     if timeline.needs_encode() and opts.mode == "copy":
         # Fades and music have nothing to act on in a stream copy. Re-encoding is the
         # only way to honour them, so switch rather than silently dropping the effects.
-        opts = replace(options, mode="encode")
+        opts = replace(opts, mode="encode")
 
     jobs = [RenderJob(source=c.source, segments=[c.as_segment()], label=c.label)
             for c in clips]

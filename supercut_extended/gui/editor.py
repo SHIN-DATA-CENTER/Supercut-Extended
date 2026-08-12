@@ -169,10 +169,14 @@ class EditorWindow(QDialog):
         self.track.scrubbed.connect(self._on_scrub)
         self.track.split.connect(self._on_split)
         self.track.aboutToChange.connect(self.push_undo)
+        self.track.volumeChanged.connect(self._on_track_volume)
         scroll = QScrollArea()
         scroll.setWidget(self.track)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # The track headers are painted at the scroll offset so they stay pinned;
+        # without a repaint on scroll they smear across the newly exposed strip.
+        scroll.horizontalScrollBar().valueChanged.connect(self.track.update)
 
         # Tools down the left, timeline to their right; the one-shot commands and the
         # zoom controls stay on the row above, spanning both.
@@ -664,6 +668,17 @@ class EditorWindow(QDialog):
 
     def _select_again(self) -> None:
         self.track.update()
+
+    def _on_track_volume(self, track: str, value: float) -> None:
+        """The level bars on the track headers and the inspector slider are two views
+        of the same number, so echo the change back without re-triggering it."""
+        if track == "bgm":
+            self._loading = True
+            try:
+                self.vol.setValue(int(round(value * 100)))
+            finally:
+                self._loading = False
+        self._refresh_summary()
 
     def _on_track_changed(self) -> None:
         self._refresh_list()
