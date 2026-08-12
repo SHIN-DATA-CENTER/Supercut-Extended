@@ -18,12 +18,12 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
 from .encoder import EncoderSpec, decode_args, video_args
-from .model import Segment
+from .model import Bgm, Segment, Timeline
 from .probe import MediaInfo, _NO_WINDOW, ffmpeg_path, probe
 
 ProgressFn = Callable[[float, str], None]
@@ -86,22 +86,47 @@ def _audio_index(mode: str, count: int) -> int:
         return 0
 
 
-def _audio_args(mode: str, info: MediaInfo) -> list[str]:
+def _fade_chain(prefix: str, fade_in_s: float, fade_out_s: float,
+                duration_s: float) -> list[str]:
+    """`fade`/`afade` pairs for one clip, or [] when neither end fades.
+
+    Times are relative to the clip because -ss/-t make its output start at 0.
+    """
+    parts = []
+    if fade_in_s > 0:
+        parts.append(f"{prefix}=t=in:st=0:d={fade_in_s:.3f}")
+    if fade_out_s > 0:
+        start = max(0.0, duration_s - fade_out_s)
+        parts.append(f"{prefix}=t=out:st={start:.3f}:d={fade_out_s:.3f}")
+    return parts
+
+
+def _audio_args(mode: str, info: MediaInfo, *, fade_in_s: float = 0.0,
+                fade_out_s: float = 0.0, duration_s: float = 0.0) -> list[str]:
     n = len(info.audio)
     if n == 0 or mode == "none":
         return ["-an"]
+    fades = _fade_chain("afade", fade_in_s, fade_out_s, duration_s)
+
     if mode == "all":
+        # Every track is mapped straight through, so there is no single stream to
+        # hang a filter on. Fading each one would need a filter per track; the
+        # montage-level fade in render_timeline covers the common case instead.
         return ["-map", "0:a", "-c:a", "aac", "-b:a", "192k"]
-    if mode == "mix":
-        if n == 1:
-            return ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+
+    tail = ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    if mode == "mix" and n > 1:
         inputs = "".join(f"[0:a:{i}]" for i in range(n))
-        return [
-            "-filter_complex", f"{inputs}amix=inputs={n}:normalize=0[aout]",
-            "-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-        ]
-    return ["-map", f"0:a:{_audio_index(mode, n)}",
-            "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+        chain = f"{inputs}amix=inputs={n}:normalize=0"
+        if fades:
+            chain += "," + ",".join(fades)
+        return ["-filter_complex", f"{chain}[aout]", "-map", "[aout]"] + tail
+
+    index = 0 if mode == "mix" else _audio_index(mode, n)
+    args = ["-map", f"0:a:{index}"]
+    if fades:
+        args += ["-af", ",".join(fades)]
+    return args + tail
 
 
 def _copy_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
@@ -129,16 +154,27 @@ def _copy_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
 
 
 def _segment_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
-                 info: MediaInfo, *, hwaccel: bool) -> list[str]:
+                 info: MediaInfo, *, hwaccel: bool,
+                 fade_in_s: float = 0.0, fade_out_s: float = 0.0) -> list[str]:
     if opts.mode == "copy":
         return _copy_cmd(src, seg, dst, opts, info)
+
+    # `fade` is a software filter and cannot touch frames sitting in GPU memory. Rather
+    # than shuttle them back and forth with hwdownload/hwupload, decode this clip on the
+    # CPU; the encode -- which is the expensive half -- still runs on the GPU.
+    video_fades = _fade_chain("fade", fade_in_s, fade_out_s, seg.duration_s)
+    if video_fades:
+        hwaccel = False
 
     cmd = [ffmpeg_path(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
     if hwaccel:
         cmd += decode_args(opts.encoder)
     cmd += ["-ss", f"{seg.start_s:.6f}", "-i", str(src), "-t", f"{seg.duration_s:.6f}"]
     cmd += ["-map", "0:v:0"]
-    cmd += _audio_args(opts.audio, info)
+    if video_fades:
+        cmd += ["-vf", ",".join(video_fades)]
+    cmd += _audio_args(opts.audio, info, fade_in_s=fade_in_s, fade_out_s=fade_out_s,
+                       duration_s=seg.duration_s)
     cmd += video_args(opts.encoder, preset=opts.preset, quality=opts.quality,
                       max_rate_kbps=opts.max_rate_kbps,
                       hw_frames=hwaccel and bool(decode_args(opts.encoder)))
@@ -262,6 +298,7 @@ def render_many(
     *,
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
+    clip_fades: Sequence[tuple[float, float]] | None = None,
 ) -> RenderResult:
     """Cut every job's segments and write them all to one montage at ``output``.
 
@@ -284,12 +321,17 @@ def render_many(
     if len(jobs) > 1:
         _check_combinable(jobs, infos, options)
 
-    # Flatten to (source, segment) so the whole batch shares one worker pool and one
-    # progress total, rather than stalling between files.
-    tasks: list[tuple[Path, Segment]] = [
-        (Path(job.source), seg) for job in jobs for seg in job.segments
-    ]
-    total_s = sum(seg.duration_s for _, seg in tasks) or 1.0
+    # Flatten to (source, segment, fades) so the whole batch shares one worker pool and
+    # one progress total, rather than stalling between files. Order is preserved, which
+    # is what lets an edited timeline hand us clips in the arrangement the user chose.
+    tasks: list[tuple[Path, Segment, tuple[float, float]]] = []
+    for i, job in enumerate(jobs):
+        for j, seg in enumerate(job.segments):
+            fade = (0.0, 0.0)
+            if clip_fades is not None and j == 0 and i < len(clip_fades):
+                fade = clip_fades[i]
+            tasks.append((Path(job.source), seg, fade))
+    total_s = sum(seg.duration_s for _, seg, _f in tasks) or 1.0
     started = time.monotonic()
 
     def report(done_s: float, msg: str) -> None:
@@ -309,7 +351,7 @@ def render_many(
         parts: list[Path] = []
 
         def encode_one(i: int) -> Path:
-            source, seg = tasks[i]
+            source, seg, (fade_in, fade_out) = tasks[i]
             info = infos[source]
             dst = tmp_dir / f"seg_{i:04d}.mp4"
 
@@ -321,7 +363,8 @@ def render_many(
 
             try:
                 _run_with_progress(
-                    _segment_cmd(source, seg, dst, options, info, hwaccel=True),
+                    _segment_cmd(source, seg, dst, options, info, hwaccel=True,
+                                 fade_in_s=fade_in, fade_out_s=fade_out),
                     on_seconds, cancel,
                 )
             except Cancelled:
@@ -330,7 +373,8 @@ def render_many(
                 # NVDEC cannot handle every stream; fall back to CPU decode but keep
                 # the GPU encoder, which is where the real cost is anyway.
                 _run_with_progress(
-                    _segment_cmd(source, seg, dst, options, info, hwaccel=False),
+                    _segment_cmd(source, seg, dst, options, info, hwaccel=False,
+                                 fade_in_s=fade_in, fade_out_s=fade_out),
                     on_seconds, cancel,
                 )
             if not dst.exists() or dst.stat().st_size == 0:
@@ -388,6 +432,101 @@ def render(
     """Cut ``segments`` out of ``source`` and write a single montage to ``output``."""
     return render_many([RenderJob(Path(source), segments)], output, options,
                        progress=progress, cancel=cancel)
+
+
+def _mix_bgm(video: Path, bgm: Bgm, output: Path, opts: RenderOptions,
+             duration_s: float, cancel: threading.Event | None) -> None:
+    """Lay music under a finished montage, keeping the video stream untouched.
+
+    The video is copied rather than re-encoded: only the audio graph changes, so there
+    is no reason to pay for a second video pass (and no reason to lose quality to one).
+    """
+    music = [ffmpeg_path(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+             "-i", str(video)]
+    if bgm.loop:
+        music += ["-stream_loop", "-1"]
+    if bgm.offset_ms > 0:
+        music += ["-ss", f"{bgm.offset_ms / 1000.0:.3f}"]
+    music += ["-i", str(bgm.path)]
+
+    chain = [f"volume={max(0.0, bgm.volume):.3f}"]
+    chain += _fade_chain("afade", bgm.fade_in_ms / 1000.0, bgm.fade_out_ms / 1000.0,
+                         duration_s)
+    # `duration=first` ends the mix with the montage, which matters when the music is
+    # looping and would otherwise run forever.
+    graph = (f"[1:a]{','.join(chain)}[bg];"
+             f"[0:a][bg]amix=inputs=2:duration=first:normalize=0[aout]")
+
+    music += ["-filter_complex", graph, "-map", "0:v:0", "-map", "[aout]",
+              "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+              "-progress", "pipe:1", "-nostats", str(output)]
+    _run_with_progress(music, lambda _s: None, cancel)
+    if not output.exists() or output.stat().st_size == 0:
+        raise RenderError("mixing the background music produced no output")
+
+
+def render_timeline(
+    timeline: Timeline,
+    output: Path,
+    options: RenderOptions,
+    *,
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+) -> RenderResult:
+    """Render an edited timeline: clips in their own order, with fades and music.
+
+    Unlike render_many(), the clip order is whatever the user arranged -- clips are not
+    sorted or merged, and two clips may come from the same source or overlap in it.
+    """
+    clips = timeline.active
+    if not clips:
+        raise RenderError("no clips to render")
+    output = Path(output)
+
+    opts = options
+    if timeline.needs_encode() and opts.mode == "copy":
+        # Fades and music have nothing to act on in a stream copy. Re-encoding is the
+        # only way to honour them, so switch rather than silently dropping the effects.
+        opts = replace(options, mode="encode")
+
+    jobs = [RenderJob(source=c.source, segments=[c.as_segment()], label=c.label)
+            for c in clips]
+    fades = [(c.fade_in_ms / 1000.0, c.fade_out_ms / 1000.0) for c in clips]
+
+    # The montage-level fade rides on the first and last clip.
+    if timeline.fade_in_ms:
+        fades[0] = (max(fades[0][0], timeline.fade_in_ms / 1000.0), fades[0][1])
+    if timeline.fade_out_ms:
+        fades[-1] = (fades[-1][0], max(fades[-1][1], timeline.fade_out_ms / 1000.0))
+
+    stage_out = output
+    tmp_mix: Path | None = None
+    if timeline.bgm is not None:
+        tmp_mix = output.with_name(output.stem + "-nomusic" + output.suffix)
+        stage_out = tmp_mix
+
+    # Reserve the tail of the progress bar for the music pass.
+    span = 0.85 if timeline.bgm is not None else 1.0
+
+    def stage_progress(frac: float, msg: str) -> None:
+        if progress:
+            progress(frac * span, msg)
+
+    result = render_many(jobs, stage_out, opts, progress=stage_progress,
+                         cancel=cancel, clip_fades=fades)
+
+    if timeline.bgm is not None and tmp_mix is not None:
+        if progress:
+            progress(span, "mixing music")
+        try:
+            _mix_bgm(tmp_mix, timeline.bgm, output, opts, result.content_s, cancel)
+        finally:
+            tmp_mix.unlink(missing_ok=True)
+        if progress:
+            progress(1.0, "done")
+        result = replace(result, output=output,
+                         size_bytes=output.stat().st_size if output.exists() else 0)
+    return result
 
 
 def render_each(

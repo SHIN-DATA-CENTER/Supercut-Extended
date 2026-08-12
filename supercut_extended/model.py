@@ -173,3 +173,95 @@ class Segment:
     @property
     def duration_s(self) -> float:
         return self.duration_ms / 1000.0
+
+
+@dataclass
+class Clip:
+    """One piece of the edited timeline: a slice of a source, in the order it plays.
+
+    Deliberately mutable and NOT derived on the fly, unlike Segment. Segments come out
+    of build_segments() already sorted and merged, which is right for "just cut my
+    kills" but makes hand editing impossible: reordering or trimming one of them would
+    be undone the next time anything recomputed. A Clip is the user's copy -- seeded
+    from the segments, then owned by the timeline.
+
+    ``source_start_ms``/``source_end_ms`` are offsets into ``source``, so trimming only
+    moves these bounds and never touches the recording.
+    """
+
+    source: Path
+    source_start_ms: float
+    source_end_ms: float
+    label: str = ""
+    fade_in_ms: float = 0.0
+    fade_out_ms: float = 0.0
+    # Where this came from, so the UI can show "kill at 4:32" and keep selection
+    # meaningful after a reorder.
+    event_kind: str | None = None
+    event_time_ms: float | None = None
+    enabled: bool = True
+
+    @property
+    def duration_ms(self) -> float:
+        return max(0.0, self.source_end_ms - self.source_start_ms)
+
+    @property
+    def duration_s(self) -> float:
+        return self.duration_ms / 1000.0
+
+    @property
+    def start_s(self) -> float:
+        return self.source_start_ms / 1000.0
+
+    def as_segment(self) -> Segment:
+        return Segment(start_ms=self.source_start_ms, end_ms=self.source_end_ms)
+
+
+@dataclass
+class Bgm:
+    """Background music laid under the whole montage."""
+
+    path: Path
+    volume: float = 0.25          # 1.0 would drown the game audio
+    fade_in_ms: float = 0.0
+    fade_out_ms: float = 0.0
+    offset_ms: float = 0.0        # skip this far into the music before it starts
+    loop: bool = True             # repeat if the montage outlasts the track
+
+
+@dataclass
+class Timeline:
+    """The edited sequence: clips in play order, plus an optional music bed."""
+
+    clips: list[Clip] = field(default_factory=list)
+    bgm: Bgm | None = None
+    # Fades applied to the montage as a whole, on top of any per-clip fades.
+    fade_in_ms: float = 0.0
+    fade_out_ms: float = 0.0
+
+    @property
+    def active(self) -> list[Clip]:
+        return [c for c in self.clips if c.enabled and c.duration_ms > 0]
+
+    @property
+    def duration_s(self) -> float:
+        return sum(c.duration_s for c in self.active)
+
+    def move(self, index: int, to: int) -> None:
+        """Reorder one clip, clamping so a drag past either end just parks it there."""
+        if not (0 <= index < len(self.clips)):
+            return
+        to = max(0, min(to, len(self.clips) - 1))
+        if to == index:
+            return
+        self.clips.insert(to, self.clips.pop(index))
+
+    def needs_encode(self) -> bool:
+        """True when the timeline asks for something a stream copy cannot do.
+
+        Fades and music both require re-encoding: a copy passes packets through
+        untouched, so there is nothing to fade or mix into.
+        """
+        if self.bgm is not None or self.fade_in_ms or self.fade_out_ms:
+            return True
+        return any(c.fade_in_ms or c.fade_out_ms for c in self.active)
