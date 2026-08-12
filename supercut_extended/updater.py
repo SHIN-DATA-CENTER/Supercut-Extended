@@ -229,6 +229,15 @@ def apply_and_restart(payload: Path) -> None:
 
     creation = 0
     if os.name == "nt":
-        creation = subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS
+        # CREATE_NEW_CONSOLE only. It must NOT be combined with DETACHED_PROCESS:
+        # CreateProcess rejects the pair outright with ERROR_INVALID_PARAMETER (87),
+        # which is what the update dialog was reporting -- the swap script was never
+        # launched at all, so self-update could not work on any build.
+        #
+        # A new console is the right one of the two: the script echoes progress and
+        # ends with `pause` when robocopy fails, and DETACHED_PROCESS gives it no
+        # console to do either in -- a failed update would hang invisibly forever.
+        # The child outlives us either way; that is what the PID wait loop is for.
+        creation = subprocess.CREATE_NEW_CONSOLE
     subprocess.Popen(["cmd", "/c", str(script)], creationflags=creation,
                      close_fds=True, cwd=str(Path(tempfile.gettempdir())))
