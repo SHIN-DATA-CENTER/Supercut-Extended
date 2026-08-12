@@ -179,3 +179,44 @@ def probe(path: Path) -> MediaInfo:
         bit_rate=int(fmt.get("bit_rate") or 0),
         audio=audio,
     )
+
+
+def detect_black_bars(path: Path, at_s: float = 0.0,
+                      sample_s: float = 4.0) -> tuple[int, int, int, int]:
+    """Measure the black borders baked into a recording, as (left, right, top, bottom).
+
+    Uses ffmpeg's cropdetect, sampled from the middle of the recording rather than the
+    start: captures often open on a dark loading screen, and cropdetect would then
+    report the whole frame as border.
+
+    Returns zeros when nothing is detected, so the caller can treat "no bars" and
+    "could not tell" the same way -- both mean "change nothing".
+    """
+    path = Path(path)
+    res = run([
+        ffmpeg_path(), "-v", "info", "-ss", f"{max(0.0, at_s):.3f}",
+        "-i", str(path), "-t", f"{sample_s:.2f}",
+        # round=2 keeps the result even, which the encoders require anyway.
+        "-vf", "cropdetect=limit=24:round=2:reset=0", "-f", "null", "-",
+    ])
+    # cropdetect prints one line per interval; the last one has seen the most frames.
+    found = None
+    for line in res.stderr.splitlines():
+        marker = line.rfind("crop=")
+        if marker >= 0:
+            found = line[marker + 5:].strip()
+    if not found:
+        return 0, 0, 0, 0
+    try:
+        w, h, x, y = (int(v) for v in found.split(":")[:4])
+    except ValueError:
+        return 0, 0, 0, 0
+
+    info = probe(path)
+    right = info.width - w - x
+    bottom = info.height - h - y
+    # A negative number means cropdetect and ffprobe disagreed about the frame size,
+    # which makes the whole reading untrustworthy.
+    if min(x, y, right, bottom) < 0:
+        return 0, 0, 0, 0
+    return x, right, y, bottom

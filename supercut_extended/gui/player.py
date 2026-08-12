@@ -4,22 +4,31 @@ There is no separate seek bar: the event timeline below the video *is* the seek 
 That is how Outplayed presents it, and it means the playhead, the event markers and
 the segments that will be cut all share one coordinate system -- so you can see the
 clip boundaries against the footage instead of guessing.
+
+The picture goes through a QGraphicsScene rather than a plain QVideoWidget, because the
+preview has to show the *output* frame: cropped, resized and optionally stretched
+exactly as the render will do it. A QVideoWidget can only letterbox a whole frame, so
+the black bars a user is trying to remove would stay on screen right up until the file
+was written.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, QSizeF, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QTransform
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
+    QFrame, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QPushButton,
+    QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
+from ..model import Framing
 from . import icons
 from .i18n import tr
-from .style import TEXT, TEXT_DIM
+from .style import BORDER, TEXT, TEXT_DIM
 
 
 def fmt_time(seconds: float) -> str:
@@ -27,6 +36,92 @@ def fmt_time(seconds: float) -> str:
     h, rem = divmod(int(seconds), 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+class FramedVideoView(QGraphicsView):
+    """Shows a video item through the output frame the render will produce.
+
+    The scene rect *is* the output frame. The video item is scaled and positioned so
+    that the kept part of the source lands inside it, which means what you see is
+    literally the geometry ffmpeg is being asked for -- including the distortion when
+    stretching is on.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        self._scene = QGraphicsScene()
+        super().__init__(self._scene, parent)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setBackgroundBrush(QBrush(QColor("#000000")))
+        self.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        self.item = QGraphicsVideoItem()
+        # The item's rect is driven directly, so it must not letterbox inside itself.
+        self.item.setAspectRatioMode(Qt.IgnoreAspectRatio)
+        self._scene.addItem(self.item)
+
+        # A hairline around the output frame: without it the padded area and the
+        # widget's own background are both black and the frame edge is invisible.
+        self._edge = self._scene.addRect(
+            QRectF(0, 0, 16, 9), QPen(QColor(BORDER), 0), QBrush(Qt.NoBrush))
+        self._edge.setZValue(10)
+
+        self._framing = Framing()
+        self._native = QSizeF(0, 0)
+        self.item.nativeSizeChanged.connect(self._on_native)
+
+    def _on_native(self, size: QSizeF) -> None:
+        if size.width() > 0 and size.height() > 0:
+            self._native = size
+            self.apply()
+
+    def set_framing(self, framing: Framing) -> None:
+        self._framing = framing
+        self.apply()
+
+    def framing(self) -> Framing:
+        return self._framing
+
+    def output_size(self) -> tuple[int, int]:
+        w, h = int(self._native.width()), int(self._native.height())
+        if w <= 0 or h <= 0:
+            return 0, 0
+        return self._framing.output_size(w, h)
+
+    def apply(self) -> None:
+        """Lay the video item out inside the output frame, then fit that on screen."""
+        nw, nh = int(self._native.width()), int(self._native.height())
+        if nw <= 0 or nh <= 0:
+            return
+        fr = self._framing
+        self.item.setSize(QSizeF(nw, nh))
+        sx, sy, sw, sh = fr.source_rect(nw, nh)
+        ow, oh = fr.output_size(nw, nh)
+
+        if fr.resizes and fr.stretch:
+            # Fill the frame and let the aspect ratio break -- that is the point.
+            scale_x, scale_y = ow / sw, oh / sh
+        else:
+            scale_x = scale_y = min(ow / sw, oh / sh)
+        # Centre the kept region in the frame; the leftovers are the black padding
+        # that the render's pad filter would add.
+        left = (ow - sw * scale_x) / 2.0
+        top = (oh - sh * scale_y) / 2.0
+        self.item.setTransform(QTransform.fromScale(scale_x, scale_y))
+        self.item.setPos(left - sx * scale_x, top - sy * scale_y)
+
+        frame = QRectF(0, 0, ow, oh)
+        self._edge.setRect(frame)
+        self._scene.setSceneRect(frame)
+        self.fitInView(frame, Qt.KeepAspectRatio)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # fitInView is a one-shot transform, so the frame has to be re-fitted whenever
+        # the widget changes size or the video would stay at its old scale.
+        if self._native.width() > 0:
+            self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
 
 
 class VideoPlayer(QWidget):
@@ -38,15 +133,14 @@ class VideoPlayer(QWidget):
         self._duration_s = 0.0
         self._prime = False
 
-        self.video = QVideoWidget()
+        self.video = FramedVideoView()
         self.video.setMinimumHeight(300)
         self.video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.video.setStyleSheet("background: #000;")
 
         self.audio_out = QAudioOutput()
         self.audio_out.setVolume(0.7)
         self.player = QMediaPlayer()
-        self.player.setVideoOutput(self.video)
+        self.player.setVideoOutput(self.video.item)
         self.player.setAudioOutput(self.audio_out)
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(self._on_duration)
@@ -63,6 +157,14 @@ class VideoPlayer(QWidget):
 
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setObjectName("timecode")
+
+        # Says what the preview is actually showing, so a cropped or stretched frame
+        # is never mistaken for the source.
+        self.frame_label = QLabel("")
+        self.frame_label.setObjectName("captionLabel")
+        # "source size" framings only resolve once the real frame size is known.
+        self.video.item.nativeSizeChanged.connect(
+            lambda _s: self._refresh_frame_label())
 
         self.volume_icon = QLabel()
         self.volume_icon.setPixmap(icons.pixmap("Media/Volume_Max", TEXT_DIM, 18))
@@ -81,6 +183,8 @@ class VideoPlayer(QWidget):
         bar.addWidget(self.prev_btn)
         bar.addWidget(self.next_btn)
         bar.addWidget(self.time_label)
+        bar.addSpacing(10)
+        bar.addWidget(self.frame_label)
         bar.addStretch(1)
         bar.addWidget(self.volume_icon)
         bar.addWidget(self.volume)
@@ -108,6 +212,23 @@ class VideoPlayer(QWidget):
         self.volume_icon.setPixmap(icons.pixmap(name, TEXT_DIM, 18))
 
     # -- API ----------------------------------------------------------------
+    def set_framing(self, framing: Framing) -> None:
+        """Preview through the output frame the render would produce."""
+        self.video.set_framing(framing)
+        self._refresh_frame_label()
+
+    def framing(self) -> Framing:
+        return self.video.framing()
+
+    def _refresh_frame_label(self) -> None:
+        framing = self.video.framing()
+        w, h = self.video.output_size()
+        if not framing.active or not w:
+            self.frame_label.setText("")
+            return
+        note = tr("frame.stretched") if (framing.stretch and framing.resizes) else ""
+        self.frame_label.setText(f"{w}x{h}{note}")
+
     def load(self, path: Path) -> None:
         """Load a file and show its first frame instead of a black rectangle.
 

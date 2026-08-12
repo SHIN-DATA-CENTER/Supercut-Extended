@@ -187,12 +187,36 @@ def speed_factor(spec: EncoderSpec, *, preset: str, quality: int) -> float:
     return preset_factor * quality_factor
 
 
+# Share of a segment's time that does NOT scale with the output frame -- decoding the
+# source, plus ffmpeg's own start-up. Fitted to measurements on a 1080p60 source
+# rendered at 1440x1080, 1920x1080 and 3840x2160: the model predicted 1.22x / 1.00x /
+# 0.32x against measured 1.19x / 0.98x / 0.30x.
+_FIXED_SHARE = 0.29
+
+
+def framing_factor(framing, width: int, height: int) -> float:
+    """How much framing changes the render speed, from the output pixel count.
+
+    Encoding dominates and scales with area, so shrinking the frame -- which is what
+    cropping black bars does -- actually makes a render *faster*. Upscaling is the
+    expensive direction. The CPU decode that framing forces is real but minor; it is
+    part of the fixed share below.
+    """
+    if framing is None or not framing.active or width <= 0 or height <= 0:
+        return 1.0
+    out_w, out_h = framing.output_size(width, height)
+    ratio = (out_w * out_h) / float(width * height)
+    return 1.0 / max(0.05, _FIXED_SHARE + (1.0 - _FIXED_SHARE) * ratio)
+
+
 def estimate_rate(spec: EncoderSpec | None, *, preset: str, quality: int,
-                  mode: str = "encode") -> float:
+                  mode: str = "encode", framing=None,
+                  source_size: tuple[int, int] | None = None) -> float:
     """Rough realtime multiplier for a render, for showing an ETA.
 
-    Never a guarantee -- it ignores the source resolution, what else the machine is
-    doing, and the fixed cost of starting ffmpeg once per segment.
+    Never a guarantee -- it ignores what else the machine is doing and the fixed cost
+    of starting ffmpeg once per segment. Framing is accounted for only when the source
+    size is known, since the cost depends on the ratio between the two.
     """
     if mode == "copy":
         return COPY_RATE
@@ -203,7 +227,10 @@ def estimate_rate(spec: EncoderSpec | None, *, preset: str, quality: int,
         # AMF/QSV are not measured here; assume they land near the NVENC figures, and
         # treat an unknown CPU encoder as the slower HEVC case.
         base = 2.6 if spec.hardware else (1.0 if spec.codec == "hevc" else 2.5)
-    return max(0.01, base * speed_factor(spec, preset=preset, quality=quality))
+    rate = base * speed_factor(spec, preset=preset, quality=quality)
+    if source_size:
+        rate *= framing_factor(framing, *source_size)
+    return max(0.01, rate)
 
 
 def pick_encoder(preferred: str | None = None) -> EncoderSpec:

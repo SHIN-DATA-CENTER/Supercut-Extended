@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
-    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import __version__, updater
@@ -29,8 +29,9 @@ from ..encoder import (DEFAULT_QUALITY, QUALITY_TIERS, EncoderSpec,
                        available_encoders, estimate_rate, group_by_engine,
                        vendor_label)
 from ..library import matches_with_highlights, read_matches
-from ..model import HIGHLIGHT_KINDS, Clip, Match, Media, Timeline
-from ..probe import MediaInfo, probe
+from ..model import (HIGHLIGHT_KINDS, RESOLUTION_PRESETS, Clip, Framing, Match,
+                     Media, Timeline)
+from ..probe import MediaInfo, detect_black_bars, probe
 from ..render import (RenderError, RenderJob, RenderOptions, render_each,
                       render_many)
 from ..segments import build_segments, total_duration_s
@@ -52,6 +53,22 @@ class LibraryLoader(QThread):
             self.loaded.emit(matches_with_highlights(read_matches()))
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class BarDetector(QThread):
+    """Runs cropdetect off the GUI thread -- it decodes several seconds of video."""
+
+    done = Signal(object)       # (left, right, top, bottom), or None if it failed
+
+    def __init__(self, path: Path, at_s: float) -> None:
+        super().__init__()
+        self._path, self._at = path, at_s
+
+    def run(self) -> None:
+        try:
+            self.done.emit(detect_black_bars(self._path, self._at))
+        except Exception:
+            self.done.emit(None)
 
 
 @dataclass
@@ -579,6 +596,7 @@ class MainWindow(QMainWindow):
             codec_block,
             speed_quality_block,
             self._field(tr("out.audio"), self.audio_combo),
+            self._build_framing_block(),
             shape_block,
             ocol,
             spacing=14))
@@ -634,6 +652,77 @@ class MainWindow(QMainWindow):
 
         self._populate_encoders()
         return holder
+
+    def _build_framing_block(self) -> QWidget:
+        """Output resolution, black-bar crop and the stretch filter.
+
+        Crop is in source pixels off each edge rather than a target aspect ratio,
+        because the bars a capture bakes in are not always symmetric and not always the
+        exact 4:3 pillar people expect. The detect button fills these in from the
+        footage, so nobody has to count pixels by hand.
+        """
+        self.res_combo = self._combo()
+        for label, w, h in RESOLUTION_PRESETS:
+            self.res_combo.addItem(label, (w, h))
+        self.res_combo.addItem(tr("frame.custom"), "custom")
+        self.res_combo.currentIndexChanged.connect(self._on_resolution_changed)
+
+        self.res_w = self._px_spin(3840 * 2, 1920)
+        self.res_h = self._px_spin(2160 * 2, 1080)
+        for s in (self.res_w, self.res_h):
+            s.setMinimum(16)
+            s.setSingleStep(2)
+            s.valueChanged.connect(self._on_framing_changed)
+        self.custom_row = QWidget()
+        crow = QHBoxLayout(self.custom_row)
+        crow.setContentsMargins(0, 0, 0, 0)
+        crow.setSpacing(6)
+        crow.addLayout(self._field(tr("frame.width"), self.res_w))
+        crow.addLayout(self._field(tr("frame.height"), self.res_h))
+        self.custom_row.setVisible(False)
+
+        crop_caption = QLabel(tr("frame.crop"))
+        crop_caption.setObjectName("fieldLabel")
+        crop_grid = QGridLayout()
+        crop_grid.setSpacing(6)
+        self.crop_spins: dict[str, QSpinBox] = {}
+        for i, (key, name) in enumerate((
+                ("crop_left", "frame.crop.left"), ("crop_right", "frame.crop.right"),
+                ("crop_top", "frame.crop.top"), ("crop_bottom", "frame.crop.bottom"))):
+            spin = self._px_spin(4000, 0)
+            spin.valueChanged.connect(self._on_framing_changed)
+            self.crop_spins[key] = spin
+            crop_grid.addLayout(self._field(tr(name), spin), i // 2, i % 2)
+
+        self.detect_btn = QPushButton(tr("frame.detect"))
+        self.detect_btn.setIcon(icons.icon("Interface/Filter", TEXT, 16))
+        self.detect_btn.setIconSize(QSize(16, 16))
+        self.detect_btn.clicked.connect(self._detect_bars)
+
+        # No per-widget stylesheet: this is an ordinary option like "use defaults" and
+        # takes the global look. checkbox_style() is for the coloured per-event boxes.
+        self.stretch_box = QCheckBox(tr("frame.stretch"))
+        self.stretch_box.toggled.connect(self._on_framing_changed)
+
+        self.frame_note = caption(tr("frame.note"))
+        self.frame_note.setVisible(False)
+
+        return block(
+            caption(tr("frame.title")),
+            self._field(tr("frame.resolution"), self.res_combo),
+            self.custom_row,
+            crop_caption, crop_grid, self.detect_btn,
+            self.stretch_box, caption(tr("frame.stretch.desc")),
+            self.frame_note,
+            spacing=6)
+
+    @staticmethod
+    def _px_spin(hi: int, val: int) -> QSpinBox:
+        spin = QSpinBox(minimum=0, maximum=hi, suffix=" px")
+        spin.setValue(val)
+        spin.setMinimumWidth(64)
+        spin.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        return spin
 
     @staticmethod
     def _combo(fixed: bool = True) -> QComboBox:
@@ -731,6 +820,77 @@ class MainWindow(QMainWindow):
         self.preset_combo.setEnabled(encoding)
         self.quality_combo.setEnabled(encoding)
 
+    # -- framing ------------------------------------------------------------
+    def _on_resolution_changed(self) -> None:
+        data = self.res_combo.currentData()
+        custom = data == "custom"
+        self.custom_row.setVisible(custom)
+        if not custom and isinstance(data, tuple) and data[0]:
+            # Seed the custom boxes from the preset just left, so switching to Custom
+            # starts from what was on screen instead of a stale 1920x1080.
+            self.res_w.blockSignals(True)
+            self.res_h.blockSignals(True)
+            self.res_w.setValue(int(data[0]))
+            self.res_h.setValue(int(data[1]))
+            self.res_w.blockSignals(False)
+            self.res_h.blockSignals(False)
+        self._on_framing_changed()
+
+    def _current_framing(self) -> Framing:
+        data = self.res_combo.currentData()
+        if data == "custom":
+            width, height = self.res_w.value(), self.res_h.value()
+        else:
+            width, height = data if isinstance(data, tuple) else (None, None)
+        return Framing(
+            width=width, height=height,
+            stretch=self.stretch_box.isChecked(),
+            **{k: s.value() for k, s in self.crop_spins.items()})
+
+    def _on_framing_changed(self) -> None:
+        framing = self._current_framing()
+        # Stretching only means something once there is a frame to stretch into.
+        self.stretch_box.setEnabled(framing.resizes)
+        self.frame_note.setVisible(framing.active)
+        self.player.set_framing(framing)
+        self._recompute()
+
+    def _detect_bars(self) -> None:
+        """Read the black borders off the previewed recording and fill the crop boxes."""
+        media = self._media
+        if media is None or media.path is None:
+            self.statusBar().showMessage(tr("frame.detect_nomedia"), 5000)
+            return
+        self.detect_btn.setEnabled(False)
+        self.detect_btn.setText(tr("frame.detecting"))
+        # Sample the middle: the opening seconds are often a dark loading screen,
+        # which would read as border and crop the whole picture away.
+        at = (self._info.duration_s / 2.0) if self._info else 0.0
+        worker = BarDetector(Path(media.path), at)
+        worker.done.connect(self._on_bars_detected, Qt.QueuedConnection)
+        worker.finished.connect(lambda: setattr(self, "_detector", None))
+        self._detector = worker      # a QThread that goes out of scope is destroyed
+        worker.start()
+
+    def _on_bars_detected(self, bars: object) -> None:
+        self.detect_btn.setEnabled(True)
+        self.detect_btn.setText(tr("frame.detect"))
+        if bars is None:
+            self.statusBar().showMessage(tr("frame.detect_fail"), 6000)
+            return
+        left, right, top, bottom = bars
+        if not any((left, right, top, bottom)):
+            self.statusBar().showMessage(tr("frame.detect_none"), 6000)
+            return
+        for key, value in (("crop_left", left), ("crop_right", right),
+                           ("crop_top", top), ("crop_bottom", bottom)):
+            self.crop_spins[key].blockSignals(True)
+            self.crop_spins[key].setValue(value)
+            self.crop_spins[key].blockSignals(False)
+        self._on_framing_changed()
+        self.statusBar().showMessage(
+            tr("frame.detected", left=left, right=right, top=top, bottom=bottom), 8000)
+
     # -- persistence --------------------------------------------------------
     def _restore_settings(self) -> None:
         s = self.settings
@@ -765,6 +925,34 @@ class MainWindow(QMainWindow):
         self.post_spin.setValue(float(s.value("post", 2.0)))
         self.gap_spin.setValue(float(s.value("gap", 0.0)))
         self.player.volume.setValue(int(s.value("volume", 70)))
+
+        # Stored as "source"/"custom"/"1920x1080" rather than a combo index, so adding
+        # a preset later does not silently change what an existing install restores.
+        # The custom sizes go in first: _on_resolution_changed overwrites them from
+        # whichever preset is current, and would otherwise wipe a restored custom size.
+        self.res_w.setValue(int(s.value("res_w", 1920)))
+        self.res_h.setValue(int(s.value("res_h", 1080)))
+        res = str(s.value("resolution", "source"))
+        if res != "source":
+            i = self.res_combo.findData("custom")
+            if res != "custom":
+                try:
+                    w, h = (int(v) for v in res.split("x", 1))
+                except ValueError:
+                    w = h = 0
+                exact = self.res_combo.findData((w, h))
+                if exact >= 0:
+                    i = exact
+                elif w and h:
+                    self.res_w.setValue(w)
+                    self.res_h.setValue(h)
+            self.res_combo.setCurrentIndex(i)
+        for key, spin in self.crop_spins.items():
+            spin.setValue(int(s.value(key, 0)))
+        self.stretch_box.setChecked(s.value("stretch", "false") == "true")
+        # Not _on_framing_changed: the custom width/height row also has to be shown or
+        # hidden to match the preset that was just restored.
+        self._on_resolution_changed()
         self._on_mode_changed()
 
     def _save_settings(self) -> None:
@@ -781,6 +969,14 @@ class MainWindow(QMainWindow):
         s.setValue("post", self.post_spin.value())
         s.setValue("gap", self.gap_spin.value())
         s.setValue("volume", self.player.volume.value())
+        data = self.res_combo.currentData()
+        s.setValue("resolution", "custom" if data == "custom"
+                   else f"{data[0]}x{data[1]}" if data and data[0] else "source")
+        s.setValue("res_w", self.res_w.value())
+        s.setValue("res_h", self.res_h.value())
+        for key, spin in self.crop_spins.items():
+            s.setValue(key, spin.value())
+        s.setValue("stretch", "true" if self.stretch_box.isChecked() else "false")
 
     # -- library ------------------------------------------------------------
     def _load_library(self) -> None:
@@ -1095,12 +1291,16 @@ class MainWindow(QMainWindow):
         self.timeline.set_data(self._info.duration_s, shown, self._segments)
 
         # Rough realtime multiplier for the ETA, from encoder.estimate_rate() so the
-        # preset and the quality both move it (see the measured tables there).
+        # preset, the quality and the output frame size all move it (see the measured
+        # tables there). The previewed match's real geometry is the source size --
+        # a batch of mixed resolutions is approximated by it.
         rate = estimate_rate(
             self._current_spec(),
             preset=self.preset_combo.currentData() or "",
             quality=self.quality_combo.currentData() or DEFAULT_QUALITY,
             mode="copy" if self.mode_copy.isChecked() else "encode",
+            framing=self._current_framing(),
+            source_size=(self._info.width, self._info.height),
         )
         targets = self._target_matches()
 
@@ -1224,6 +1424,7 @@ class MainWindow(QMainWindow):
             quality=self.quality_combo.currentData() or DEFAULT_QUALITY,
             audio=self.audio_combo.currentData() or "0",
             mode="copy" if self.mode_copy.isChecked() else "encode",
+            framing=self._current_framing(),
         )
         use_defaults = self.use_defaults.isChecked()
         plan = BatchPlan(
@@ -1327,6 +1528,7 @@ class MainWindow(QMainWindow):
             quality=self.quality_combo.currentData() or DEFAULT_QUALITY,
             audio=self.audio_combo.currentData() or "0",
             mode="copy" if self.mode_copy.isChecked() else "encode",
+            framing=self._current_framing(),
         )
 
         self._editor = EditorWindow(timeline, limits, out, options, self)

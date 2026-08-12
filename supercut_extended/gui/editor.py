@@ -231,12 +231,17 @@ class EditorWindow(QDialog):
         self.player = VideoPlayer()
         self.player.positionChanged.connect(self._on_position)
         self.player.setMinimumHeight(140)
+        # Same framing the render will use, so the monitor is the output frame rather
+        # than the raw recording -- black bars included or removed exactly as written.
+        self.player.set_framing(self._options.framing)
         lay.addWidget(self.player, 1)
         self.tc_label = QLabel("00:00.00 / 00:00.00")
         self.tc_label.setAlignment(Qt.AlignCenter)
         self.tc_label.setObjectName("summary")
         lay.addWidget(self.tc_label)
-        note = QLabel(tr("editor.preview_note"))
+        note = QLabel(tr("editor.preview_note")
+                      + ("  " + tr("frame.preview_source")
+                         if self._options.framing.active else ""))
         note.setObjectName("captionLabel")
         note.setWordWrap(True)
         lay.addWidget(note)

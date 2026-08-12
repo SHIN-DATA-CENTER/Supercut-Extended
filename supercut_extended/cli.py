@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .encoder import available_encoders, describe, pick_encoder
 from .library import LibraryError, matches_with_highlights, read_matches
-from .model import HIGHLIGHT_KINDS, Match, Media
+from .model import HIGHLIGHT_KINDS, Framing, Match, Media
 from .probe import ProbeError, probe
 from .render import RenderJob, RenderOptions, render_each, render_many
 from .segments import build_segments, total_duration_s
@@ -152,6 +152,45 @@ def resolve_matches(matches: list[Match], selectors: list[str]) -> list[Match]:
     return sorted(chosen, key=lambda m: m.start_time_ms)
 
 
+def _framing_from_args(args: argparse.Namespace) -> Framing:
+    """Build the output framing from --size / --crop / --stretch."""
+    width = height = None
+    if args.size:
+        try:
+            width, height = (int(v) for v in str(args.size).lower().split("x", 1))
+        except ValueError:
+            raise SystemExit(f"--size wants WIDTHxHEIGHT, not {args.size!r}")
+    crops = [0, 0, 0, 0]
+    if args.crop:
+        parts = [p.strip() for p in str(args.crop).split(",")]
+        if len(parts) not in (1, 2, 4):
+            raise SystemExit("--crop takes 1, 2 or 4 numbers "
+                             "(all / left,right / left,right,top,bottom)")
+        try:
+            nums = [int(p) for p in parts]
+        except ValueError:
+            raise SystemExit(f"--crop wants whole pixels, not {args.crop!r}")
+        # 1 number crops every edge, 2 crops the sides -- the common pillarbox case.
+        crops = nums * 4 if len(nums) == 1 else (nums + [0, 0]) if len(nums) == 2 \
+            else nums
+    if args.stretch and (width is None or height is None):
+        raise SystemExit("--stretch needs --size: there is no frame to stretch into")
+    return Framing(width=width, height=height, stretch=args.stretch,
+                   crop_left=crops[0], crop_right=crops[1],
+                   crop_top=crops[2], crop_bottom=crops[3])
+
+
+def _framing_summary(framing: Framing) -> str:
+    bits = []
+    if framing.resizes:
+        bits.append(f"{framing.width}x{framing.height}"
+                    + (" stretched" if framing.stretch else " (fit)"))
+    if framing.crops:
+        bits.append(f"crop L{framing.crop_left} R{framing.crop_right} "
+                    f"T{framing.crop_top} B{framing.crop_bottom}")
+    return ", ".join(bits)
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     matches = filter_by_game(matches_with_highlights(read_matches(args.db)), args.game)
     selected = resolve_matches(matches, args.match)
@@ -222,11 +261,15 @@ def cmd_build(args: argparse.Namespace) -> int:
     if not spec.hardware:
         print(f"  WARNING: falling back to {spec.name} (CPU) - no GPU encoder usable")
 
+    framing = _framing_from_args(args)
     opts = RenderOptions(
         encoder=spec, preset=args.preset or spec.default_preset,
         quality=args.quality, max_rate_kbps=args.max_rate,
         audio=args.audio, workers=args.workers, mode=args.mode,
+        framing=framing,
     )
+    if framing.active:
+        print(f"  framing  {_framing_summary(framing)}")
     if opts.mode == "copy":
         print(f"  mode     copy (stream copy, no re-encode) audio={opts.audio}")
     else:
@@ -312,6 +355,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quality", type=int, default=23, help="CQ/CRF, lower is better")
     p.add_argument("--max-rate", type=int, default=25000, help="ceiling in kbit/s")
     p.add_argument("--audio", default="0", help="track index, 'all', 'mix' or 'none'")
+    p.add_argument("--size", help="output resolution, e.g. 1920x1080 "
+                                  "(default: keep the source size)")
+    p.add_argument("--crop", help="black bars to cut off, in source pixels: "
+                                  "'240' (all edges), '240,240' (left,right) or "
+                                  "'240,240,0,0' (left,right,top,bottom)")
+    p.add_argument("--stretch", action="store_true",
+                   help="fill --size instead of padding, changing the aspect ratio "
+                        "(for a 4:3 game recorded inside a 16:9 capture)")
     p.add_argument("--workers", type=int, default=2, help="parallel segment encodes")
     p.add_argument("--mode", choices=("encode", "copy"), default="encode",
                    help="encode = Outplayed-equivalent re-encode on GPU (default); "
