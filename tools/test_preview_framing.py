@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QPoint, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
@@ -140,6 +140,41 @@ def main() -> int:
     shot = shoot(player)
     expect(column_red(shot, 0.02) < 40, "the untouched bars are still shown",
            f"{column_red(shot, 0.02):.0f}")
+
+    print("-- outside the frame is the window background, not black bars --")
+    # The widget is almost never the same shape as the video, and the leftover used to
+    # be painted black -- bars that are in neither the footage nor the output.
+    player.set_framing(Framing())
+    player.setStyleSheet("background: #1e5aa8;")   # an unmistakable stand-in
+    player.resize(900, 300)                        # far wider than 16:9, so there IS leftover
+    settle(600)
+    view = player.video
+    # Grab the PLAYER, not the view. Rendering the view on its own paints no parent
+    # behind it, so the leftover comes back as uninitialised black no matter what the
+    # widget does -- which looks exactly like the bug being tested for.
+    shot = player.grab().toImage()
+    frame = view.mapFromScene(view._scene.sceneRect()).boundingRect()
+    expect(frame.width() < view.width() - 20,
+           "the video really does leave the widget unfilled",
+           f"frame {frame.width()}px in a {view.width()}px widget")
+    left = view.mapTo(player, QPoint(4, view.height() // 2))
+    outside = QImage.pixelColor(shot, left.x(), left.y())
+    expect(outside.blue() > 100 and outside.red() < 90,
+           "the leftover shows the parent background",
+           f"rgb({outside.red()},{outside.green()},{outside.blue()})")
+    expect(not (outside.red() < 20 and outside.green() < 20 and outside.blue() < 20),
+           "the leftover is not black")
+
+    print("-- padding that WILL be encoded is still shown black --")
+    player.set_framing(Framing(width=1920, height=1080, crop_left=240, crop_right=240))
+    settle(600)
+    shot = player.grab().toImage()
+    frame = view.mapFromScene(view._scene.sceneRect()).boundingRect()
+    inside = view.mapTo(player, QPoint(frame.left() + 3, view.height() // 2))
+    inside_edge = QImage.pixelColor(shot, inside.x(), inside.y())
+    expect(inside_edge.red() < 40 and inside_edge.blue() < 60,
+           "real output padding is drawn black inside the frame",
+           f"rgb({inside_edge.red()},{inside_edge.green()},{inside_edge.blue()})")
 
     player.stop()
     print("\n" + ("preview framing OK" if not failures

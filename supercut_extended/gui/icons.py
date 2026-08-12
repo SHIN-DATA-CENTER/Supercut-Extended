@@ -65,9 +65,41 @@ def _cache_dir() -> Path:
     return d
 
 
+# Glyphs the coolicons set does not contain. An editor needs a pointer and a cutting
+# tool, and there is neither a mouse cursor nor a blade in the set.
+#
+# Kept here as source rather than dropped into "cooliocns SVG/": that folder is a
+# third-party set which is also gitignored, so anything added to it would be both
+# mixed in with someone else's work and missing from the repository. Written in the
+# same shape as the set (24x24, stroke="currentColor", width 2, round caps) so
+# _recolour and the renderer treat them identically.
+_BUILTIN_SVG: dict[str, str] = {
+    # Classic arrow cursor.
+    "Tool/Select":
+        '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"'
+        ' xmlns="http://www.w3.org/2000/svg">'
+        '<path d="M5.5 3.2 L5.5 17.8 L9.4 14.1 L12 20 L14.9 18.7 L12.3 12.9'
+        ' L17.9 12.4 Z" stroke="currentColor" stroke-width="2"'
+        ' stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    # Scissors: two handles and a pair of crossing blades.
+    "Tool/Cut":
+        '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"'
+        ' xmlns="http://www.w3.org/2000/svg">'
+        '<circle cx="6.5" cy="18" r="2.6" stroke="currentColor" stroke-width="2"/>'
+        '<circle cx="17.5" cy="18" r="2.6" stroke="currentColor" stroke-width="2"/>'
+        '<path d="M8.5 16.2 L19 3.5" stroke="currentColor" stroke-width="2"'
+        ' stroke-linecap="round"/>'
+        '<path d="M15.5 16.2 L5 3.5" stroke="currentColor" stroke-width="2"'
+        ' stroke-linecap="round"/></svg>',
+}
+
+
 @lru_cache(maxsize=512)
 def _svg_source(name: str) -> str | None:
     """`name` is "Category/Icon_Name", e.g. "Media/Play"."""
+    builtin = _BUILTIN_SVG.get(name)
+    if builtin is not None:
+        return builtin
     path = icon_root() / f"{name}.svg"
     if not path.is_file():
         return None

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, QSizeF, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QTransform
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -29,7 +29,11 @@ from ..model import Framing
 from . import icons
 from .controls import NoScrollSlider
 from .i18n import tr
-from .style import BORDER, TEXT, TEXT_DIM
+from .style import ACCENT, ACCENT_HI, BORDER, TEXT, TEXT_DIM
+
+# The unplayed track and the "you would seek here" shade behind the pointer.
+TRACK_BG = "#2a3346"
+TRACK_HOVER = "#3d4a63"
 
 
 def fmt_time(seconds: float) -> str:
@@ -46,6 +50,12 @@ class FramedVideoView(QGraphicsView):
     that the kept part of the source lands inside it, which means what you see is
     literally the geometry ffmpeg is being asked for -- including the distortion when
     stretching is on.
+
+    Nothing outside that frame is painted. The widget is almost always a different
+    shape from the video, and filling the leftover with black drew bars that are not
+    in the footage and not in the output -- so the surrounding area is left
+    transparent and the window's own background shows through instead. Black is
+    painted *inside* the frame only, where padding really will be encoded.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -54,19 +64,30 @@ class FramedVideoView(QGraphicsView):
         self.setFrameShape(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setBackgroundBrush(QBrush(QColor("#000000")))
         self.setRenderHint(QPainter.SmoothPixmapTransform)
+        # No background brush and a transparent viewport: the parent paints here.
+        self.setBackgroundBrush(QBrush(Qt.NoBrush))
+        self.setStyleSheet("background: transparent; border: none;")
+        self.viewport().setAutoFillBackground(False)
+
+        # The output frame itself, painted black underneath the picture. When no
+        # framing is set the video covers it exactly, so nothing shows; when framing
+        # pads, this is the padding that really does get encoded.
+        self._backdrop = self._scene.addRect(
+            QRectF(0, 0, 16, 9), QPen(Qt.NoPen), QBrush(QColor("#000000")))
+        self._backdrop.setZValue(-10)
 
         self.item = QGraphicsVideoItem()
         # The item's rect is driven directly, so it must not letterbox inside itself.
         self.item.setAspectRatioMode(Qt.IgnoreAspectRatio)
         self._scene.addItem(self.item)
 
-        # A hairline around the output frame: without it the padded area and the
-        # widget's own background are both black and the frame edge is invisible.
+        # A hairline marking the output frame, shown only when framing is actually
+        # doing something -- otherwise it would just trace the edge of the picture.
         self._edge = self._scene.addRect(
             QRectF(0, 0, 16, 9), QPen(QColor(BORDER), 0), QBrush(Qt.NoBrush))
         self._edge.setZValue(10)
+        self._edge.setVisible(False)
 
         self._framing = Framing()
         self._native = QSizeF(0, 0)
@@ -113,7 +134,9 @@ class FramedVideoView(QGraphicsView):
         self.item.setPos(left - sx * scale_x, top - sy * scale_y)
 
         frame = QRectF(0, 0, ow, oh)
+        self._backdrop.setRect(frame)
         self._edge.setRect(frame)
+        self._edge.setVisible(fr.active)
         self._scene.setSceneRect(frame)
         self.fitInView(frame, Qt.KeepAspectRatio)
 
@@ -123,6 +146,156 @@ class FramedVideoView(QGraphicsView):
         # the widget changes size or the video would stay at its old scale.
         if self._native.width() > 0:
             self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+
+
+class SeekBar(QWidget):
+    """A thin scrubber that thickens under the pointer, as video players do.
+
+    Not a QSlider: a slider's groove and handle are a fixed size, and the whole point
+    here is that the bar is unobtrusive until you reach for it. Drawing it directly is
+    also what allows the hover time to be shown at the pointer rather than as a
+    tooltip that appears half a second late.
+    """
+
+    seeked = Signal(float)        # seconds, released
+    scrubbing = Signal(bool)      # dragging started / finished
+
+    HEIGHT = 20                   # generous hit area; the bar itself is thinner
+    IDLE_H = 3.0
+    HOVER_H = 6.0
+    KNOB_R = 6.5
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self._duration = 0.0
+        self._position = 0.0
+        self._hover_x: float | None = None
+        self._dragging = False
+        self._grow = 0.0          # 0 = idle, 1 = fully expanded
+
+        # Animating the thickness rather than snapping it is most of what makes this
+        # read as a video player instead of a progress bar.
+        self._anim = QTimer(self)
+        self._anim.setInterval(16)
+        self._anim.timeout.connect(self._step)
+
+    # -- state --------------------------------------------------------------
+    def set_duration(self, seconds: float) -> None:
+        self._duration = max(0.0, seconds)
+        self.update()
+
+    def set_position(self, seconds: float) -> None:
+        if self._dragging:
+            return            # never fight the pointer while it is being dragged
+        self._position = max(0.0, seconds)
+        self.update()
+
+    def is_dragging(self) -> bool:
+        return self._dragging
+
+    # -- geometry -----------------------------------------------------------
+    def _track(self) -> QRectF:
+        h = self.IDLE_H + (self.HOVER_H - self.IDLE_H) * self._grow
+        return QRectF(self.KNOB_R, (self.height() - h) / 2.0,
+                      max(1.0, self.width() - 2 * self.KNOB_R), h)
+
+    def _fraction_at(self, x: float) -> float:
+        track = self._track()
+        if track.width() <= 0:
+            return 0.0
+        return min(1.0, max(0.0, (x - track.left()) / track.width()))
+
+    def _fraction(self) -> float:
+        if self._duration <= 0:
+            return 0.0
+        return min(1.0, max(0.0, self._position / self._duration))
+
+    # -- animation ----------------------------------------------------------
+    def _target_grow(self) -> float:
+        return 1.0 if (self.underMouse() or self._dragging) else 0.0
+
+    def _step(self) -> None:
+        target = self._target_grow()
+        self._grow += (target - self._grow) * 0.35
+        if abs(target - self._grow) < 0.01:
+            self._grow = target
+            self._anim.stop()
+        self.update()
+
+    def _animate(self) -> None:
+        if not self._anim.isActive():
+            self._anim.start()
+
+    # -- events -------------------------------------------------------------
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self._animate()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._hover_x = None
+        self._animate()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton or self._duration <= 0:
+            return
+        self._dragging = True
+        self.scrubbing.emit(True)
+        self._hover_x = event.position().x()
+        self._position = self._fraction_at(self._hover_x) * self._duration
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        self._hover_x = event.position().x()
+        if self._dragging and self._duration > 0:
+            self._position = self._fraction_at(self._hover_x) * self._duration
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton or not self._dragging:
+            return
+        self._dragging = False
+        self.scrubbing.emit(False)
+        if self._duration > 0:
+            self.seeked.emit(self._fraction_at(event.position().x()) * self._duration)
+        self._animate()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        track = self._track()
+        radius = track.height() / 2.0
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(TRACK_BG))
+        p.drawRoundedRect(track, radius, radius)
+
+        # Where the pointer would seek to, drawn behind the played portion.
+        if self._hover_x is not None and self._duration > 0:
+            hover = QRectF(track)
+            hover.setWidth(track.width() * self._fraction_at(self._hover_x))
+            p.setBrush(QColor(TRACK_HOVER))
+            p.drawRoundedRect(hover, radius, radius)
+
+        played = QRectF(track)
+        played.setWidth(track.width() * self._fraction())
+        p.setBrush(QColor(ACCENT))
+        p.drawRoundedRect(played, radius, radius)
+
+        if self._grow > 0.01 and self._duration > 0:
+            r = self.KNOB_R * self._grow
+            cx = track.left() + track.width() * self._fraction()
+            p.setBrush(QColor(ACCENT_HI))
+            p.drawEllipse(QPointF(cx, track.center().y()), r, r)
+        p.end()
+
+    def hover_seconds(self) -> float | None:
+        if self._hover_x is None or self._duration <= 0:
+            return None
+        return self._fraction_at(self._hover_x) * self._duration
 
 
 class VideoPlayer(QWidget):
@@ -167,6 +340,12 @@ class VideoPlayer(QWidget):
         self.video.item.nativeSizeChanged.connect(
             lambda _s: self._refresh_frame_label())
 
+        # Deliberately NOT called `seek`: that name is already the method callers use
+        # (main_window wires timeline.seekRequested straight to player.seek), and an
+        # attribute of the same name would silently replace it.
+        self.seek_bar = SeekBar()
+        self.seek_bar.seeked.connect(self.seek)
+
         self.volume_icon = QLabel()
         self.volume_icon.setPixmap(icons.pixmap("Media/Volume_Max", TEXT_DIM, 18))
 
@@ -192,8 +371,9 @@ class VideoPlayer(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
+        lay.setSpacing(2)
         lay.addWidget(self.video, 1)
+        lay.addWidget(self.seek_bar)
         lay.addLayout(bar)
 
     def _transport(self, icon_name: str, tip: str, width: int) -> QPushButton:
@@ -277,12 +457,14 @@ class VideoPlayer(QWidget):
     def _on_position(self, ms: int) -> None:
         secs = ms / 1000.0
         self.time_label.setText(f"{fmt_time(secs)} / {fmt_time(self._duration_s)}")
+        self.seek_bar.set_position(secs)
         self.positionChanged.emit(secs)
 
     def _on_duration(self, ms: int) -> None:
         self._duration_s = ms / 1000.0
         self.time_label.setText(
             f"{fmt_time(self.position_s())} / {fmt_time(self._duration_s)}")
+        self.seek_bar.set_duration(self._duration_s)
         self.durationChanged.emit(self._duration_s)
 
     def _on_state(self, state) -> None:

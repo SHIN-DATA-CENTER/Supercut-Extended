@@ -122,6 +122,28 @@ def main() -> int:
             win._clear_bgm()
             expect(timeline.bgm is None, "music can be removed")
 
+            print("-- tool palette --")
+            for name, btn in (("select", win.tool_select), ("cut", win.tool_cut),
+                              ("duplicate", win.dup_btn), ("delete", win.del_btn)):
+                expect(not btn.icon().isNull(), f"{name} has an icon")
+                expect(btn.text() == "", f"{name} is icon-only, not a text button",
+                       repr(btn.text()))
+                expect(bool(btn.toolTip()), f"{name} explains itself on hover")
+            expect(win.tool_select.isCheckable() and win.tool_cut.isCheckable(),
+                   "the modal tools are toggles")
+            expect(not win.dup_btn.isCheckable() and not win.del_btn.isCheckable(),
+                   "the one-shot commands are not toggles")
+            # Vertical strip: the tools sit above one another, not side by side.
+            xs = {win.tool_select.pos().x(), win.tool_cut.pos().x(),
+                  win.dup_btn.pos().x(), win.del_btn.pos().x()}
+            expect(len(xs) == 1, "the tools share one column", str(sorted(xs)))
+            expect(win.tool_cut.pos().y() > win.tool_select.pos().y(),
+                   "cut sits below select")
+            palette = win.tool_select.parentWidget()
+            expect(palette.x() < win.track.mapTo(palette.parentWidget(),
+                                                 QPoint(0, 0)).x(),
+                   "the palette is left of the timeline")
+
             print("-- razor tool --")
             win._set_tool("cut")
             expect(track.tool() == "cut", "cut tool active", track.tool())

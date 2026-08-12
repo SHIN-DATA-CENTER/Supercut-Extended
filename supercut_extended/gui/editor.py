@@ -30,7 +30,7 @@ from .clip_timeline import ClipTimelineWidget, timecode
 from .controls import NoScrollDoubleSpinBox, NoScrollSlider
 from .i18n import event_label, tr
 from .player import VideoPlayer
-from .style import build_style
+from .style import TEXT, build_style
 
 
 class TimelineWorker(QObject):
@@ -174,12 +174,20 @@ class EditorWindow(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
+        # Tools down the left, timeline to their right; the one-shot commands and the
+        # zoom controls stay on the row above, spanning both.
+        track_row = QHBoxLayout()
+        track_row.setContentsMargins(0, 0, 0, 0)
+        track_row.setSpacing(6)
+        track_row.addWidget(self._build_tool_palette())
+        track_row.addWidget(scroll, 1)
+
         bottom = QWidget()
         blay = QVBoxLayout(bottom)
         blay.setContentsMargins(0, 0, 0, 0)
         blay.setSpacing(6)
         blay.addLayout(self._build_toolbar())
-        blay.addWidget(scroll, 1)
+        blay.addLayout(track_row, 1)
 
         split = QSplitter(Qt.Vertical)
         split.addWidget(top)
@@ -324,24 +332,61 @@ class EditorWindow(QDialog):
         holder.setFrameShape(QFrame.NoFrame)
         return holder
 
+    def _tool_button(self, icon_name: str, tip: str, checkable: bool) -> QPushButton:
+        btn = QPushButton()
+        btn.setObjectName("toolButton")
+        btn.setIcon(icons.icon(icon_name, TEXT, 19))
+        btn.setIconSize(QSize(19, 19))
+        btn.setFixedSize(34, 34)
+        btn.setCheckable(checkable)
+        btn.setToolTip(tip)
+        return btn
+
+    def _build_tool_palette(self) -> QWidget:
+        """The tool strip, stacked vertically down the left of the timeline.
+
+        Where an editor puts it, and it keeps the modal tools (what a click on the
+        timeline *does*) visually separate from the one-shot commands above.
+        """
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 4, 0)
+        lay.setSpacing(4)
+
+        self.tool_select = self._tool_button("Tool/Select", tr("editor.tool_select"), True)
+        self.tool_cut = self._tool_button("Tool/Cut", tr("editor.tool_cut"), True)
+        for btn, name in ((self.tool_select, "select"), (self.tool_cut, "cut")):
+            btn.clicked.connect(lambda _c, n=name: self._set_tool(n))
+            lay.addWidget(btn)
+        self.tool_select.setChecked(True)
+
+        rule = QFrame()
+        rule.setFrameShape(QFrame.HLine)
+        rule.setObjectName("sectionRule")
+        rule.setFixedHeight(1)
+        lay.addWidget(rule)
+
+        # Act on the selected clip rather than changing what the pointer does, so they
+        # sit below the divider.
+        self.dup_btn = self._tool_button("Edit/Copy", tr("editor.duplicate"), False)
+        self.dup_btn.clicked.connect(self._duplicate)
+        self.del_btn = self._tool_button("Interface/Trash_Empty", tr("editor.remove"),
+                                         False)
+        self.del_btn.clicked.connect(self._remove_clip)
+        lay.addWidget(self.dup_btn)
+        lay.addWidget(self.del_btn)
+        lay.addStretch(1)
+        return box
+
     def _build_toolbar(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(6)
-        self.tool_select = QPushButton(tr("editor.tool_select"))
-        self.tool_cut = QPushButton(tr("editor.tool_cut"))
-        for btn, name in ((self.tool_select, "select"), (self.tool_cut, "cut")):
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _c, n=name: self._set_tool(n))
-            row.addWidget(btn)
-        self.tool_select.setChecked(True)
 
-        self.undo_btn = QPushButton(tr("editor.undo"))
+        self.undo_btn = self._tool_button("Edit/Undo", tr("editor.undo"), False)
         self.undo_btn.clicked.connect(self.undo)
-        self.redo_btn = QPushButton(tr("editor.redo"))
+        self.redo_btn = self._tool_button("Edit/Redo", tr("editor.redo"), False)
         self.redo_btn.clicked.connect(self.redo)
-        self.dup_btn = QPushButton(tr("editor.duplicate"))
-        self.dup_btn.clicked.connect(self._duplicate)
-        for b in (self.undo_btn, self.redo_btn, self.dup_btn):
+        for b in (self.undo_btn, self.redo_btn):
             row.addWidget(b)
 
         hint = QLabel(tr("editor.hint"))
@@ -549,7 +594,7 @@ class EditorWindow(QDialog):
         try:
             enabled = clip is not None
             for w in (self.enabled_box, self.clip_fade_in_ms, self.clip_fade_out_ms,
-                      self.len_spin, self.remove_btn):
+                      self.len_spin, self.remove_btn, self.dup_btn, self.del_btn):
                 w.setEnabled(enabled)
             if clip is None:
                 self.clip_label.setText(tr("editor.noselection"))

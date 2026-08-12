@@ -121,6 +121,16 @@ QPushButton#primary:disabled {{ background: #1b2536; border-color: {BORDER};
 QPushButton#transport {{ padding: 0; border-radius: 7px; }}
 QPushButton#transport:hover {{ background: #222b3d; }}
 
+/* Editor tool palette: icon-only squares. The checked tool is filled with the accent
+   so which tool is armed is readable at a glance, the way an NLE shows it. */
+QPushButton#toolButton {{ padding: 0; border-radius: 8px; background: transparent;
+    border: 1px solid transparent; }}
+QPushButton#toolButton:hover {{ background: {SURFACE_2}; border-color: {BORDER}; }}
+QPushButton#toolButton:checked {{ background: {ACCENT}; border-color: {ACCENT_HI}; }}
+QPushButton#toolButton:checked:hover {{ background: {ACCENT_HI}; }}
+QPushButton#toolButton:disabled {{ background: transparent;
+    border-color: transparent; }}
+
 QProgressBar {{ background: {SURFACE_2}; border: 1px solid {BORDER};
     border-radius: 8px; height: 22px; text-align: center; color: {TEXT}; }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 7px; }}
