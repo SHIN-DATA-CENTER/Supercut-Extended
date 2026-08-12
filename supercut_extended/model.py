@@ -256,6 +256,30 @@ class Timeline:
             return
         self.clips.insert(to, self.clips.pop(index))
 
+    def locate(self, seconds: float) -> tuple[int, float]:
+        """Map a position in the finished montage to (clip index, offset into it).
+
+        The sequence only exists as this list, so scrubbing the output has to be
+        translated back into "which clip, and how far into its source".
+        """
+        remaining = max(0.0, seconds)
+        active = self.active
+        for clip in active:
+            if remaining < clip.duration_s or clip is active[-1]:
+                return self.clips.index(clip), min(remaining, clip.duration_s)
+            remaining -= clip.duration_s
+        return -1, 0.0
+
+    def start_of(self, index: int) -> float:
+        """Where a clip begins in the finished montage, in seconds."""
+        total = 0.0
+        for i, clip in enumerate(self.clips):
+            if i == index:
+                return total
+            if clip.enabled and clip.duration_ms > 0:
+                total += clip.duration_s
+        return total
+
     def needs_encode(self) -> bool:
         """True when the timeline asks for something a stream copy cannot do.
 

@@ -1,14 +1,15 @@
-"""The editing timeline: clips laid out in play order, draggable and trimmable.
+"""The editing timeline: a ruler, named tracks, and clips laid out in play order.
 
-This is a different animal from timeline.TimelineWidget, which shows *one recording*
-on a real time axis and doubles as a seek bar. Here the x axis is the OUTPUT: clips sit
+Different animal from timeline.TimelineWidget, which shows *one recording* on a real
+time axis and doubles as a seek bar. Here the x axis is the OUTPUT sequence: clips sit
 end to end in the order they will play, so dragging one past another reorders the
-montage, and dragging a clip's edge trims it.
+montage and dragging a clip's edge trims it.
 
-Two interactions share the mouse, decided by where the press lands:
+Three interactions share the mouse, decided by where the press lands:
 
+    on the ruler                                       -> scrub the whole sequence
     within EDGE_GRAB px of a clip's left/right border  -> trim that end
-    anywhere else on the clip                          -> reorder
+    anywhere else on a clip                            -> reorder
 
 Trimming is clamped to the source recording's real length, which the caller supplies:
 a clip may only be pulled outward as far as footage actually exists.
@@ -28,37 +29,46 @@ from .timeline import event_color
 
 EDGE_GRAB = 7           # px from a clip border that starts a trim instead of a move
 MIN_CLIP_MS = 200.0     # never let a trim collapse a clip to nothing
-CLIP_TOP = 34
-CLIP_H = 78
-BGM_TOP = CLIP_TOP + CLIP_H + 14
-BGM_H = 34
+HEADER_W = 64           # track-name column down the left
+RULER_H = 24
+CLIP_TOP = RULER_H + 10
+CLIP_H = 74
+BGM_TOP = CLIP_TOP + CLIP_H + 8
+BGM_H = 32
 MIN_PX_PER_S = 4.0
+PLAYHEAD = "#f87171"
+
+
+def timecode(seconds: float) -> str:
+    """h:mm:ss.cc -- the montage is short, so centiseconds are the useful precision."""
+    seconds = max(0.0, seconds)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(int(m), 60)
+    body = f"{m:02d}:{s:05.2f}"
+    return f"{h}:{body}" if h else body
 
 
 class ClipTimelineWidget(QWidget):
-    """Drag to reorder, drag an edge to trim."""
+    """Drag to reorder, drag an edge to trim, drag the ruler to scrub."""
 
     changed = Signal()                  # the timeline was mutated
     selected = Signal(int)              # clip index, or -1
+    scrubbed = Signal(float)            # seconds into the whole sequence
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(BGM_TOP + BGM_H + 18)
+        self.setMinimumHeight(BGM_TOP + BGM_H + 16)
         self.setMouseTracking(True)
         self._timeline = Timeline()
         self._limits: dict[Path, float] = {}     # source -> real duration in ms
         self._zoom = 1.0
         self._index = -1                          # selected clip
-        self._mode = ""                           # "", "move", "trim-l", "trim-r"
+        self._mode = ""                           # "", "move", "trim-l", "trim-r", "scrub"
         self._drag_from = 0.0
         self._drag_origin: tuple[float, float] = (0.0, 0.0)
         self._insert_at = -1
-        self._play_at: tuple[int, float] | None = None   # (clip index, 0..1 through it)
-
-    def set_playhead(self, index: int, ratio: float) -> None:
-        """Show where preview playback has reached, as a position inside one clip."""
-        self._play_at = None if index < 0 else (index, max(0.0, min(1.0, ratio)))
-        self.update()
+        self._play_s = 0.0                        # playhead, in sequence seconds
+        self._show_play = False
 
     # -- data ---------------------------------------------------------------
     def set_timeline(self, timeline: Timeline, limits: dict[Path, float]) -> None:
@@ -72,28 +82,43 @@ class ClipTimelineWidget(QWidget):
     def selected_index(self) -> int:
         return self._index
 
+    def select(self, index: int) -> None:
+        self._index = index
+        self.selected.emit(index)
+        self.update()
+
+    def set_playhead_seconds(self, seconds: float, visible: bool = True) -> None:
+        self._play_s = max(0.0, seconds)
+        self._show_play = visible
+        self.update()
+
     def set_zoom(self, zoom: float) -> None:
-        self._zoom = max(0.2, min(zoom, 12.0))
+        self._zoom = max(0.2, min(zoom, 20.0))
+        self._rescale()
+        self.update()
+
+    def zoom(self) -> float:
+        return self._zoom
+
+    def fit(self) -> None:
+        self._zoom = 1.0
         self._rescale()
         self.update()
 
     def _rescale(self) -> None:
-        """Width follows the content so the parent scroll area can pan it."""
         total = max(1.0, self._timeline.duration_s)
-        self.setMinimumWidth(int(total * self._px_per_s()) + 40)
+        self.setMinimumWidth(int(HEADER_W + total * self._px_per_s()) + 30)
 
     def _px_per_s(self) -> float:
         total = max(1.0, self._timeline.duration_s)
-        # Fit the viewport at zoom 1, then scale from there.
-        fit = max(MIN_PX_PER_S, (self.parent().width() - 60) / total
-                  if self.parent() else 60.0)
+        viewport = (self.parent().width() if self.parent() else 900) - HEADER_W - 40
+        fit = max(MIN_PX_PER_S, viewport / total)
         return fit * self._zoom
 
     # -- geometry -----------------------------------------------------------
     def _rects(self) -> list[tuple[int, QRectF]]:
-        """(clip index, rect) for every clip, laid out end to end."""
         out = []
-        x = 20.0
+        x = float(HEADER_W)
         pps = self._px_per_s()
         for i, clip in enumerate(self._timeline.clips):
             w = max(6.0, clip.duration_s * pps)
@@ -101,7 +126,15 @@ class ClipTimelineWidget(QWidget):
             x += w + 2
         return out
 
+    def _x_for_seconds(self, seconds: float) -> float:
+        return HEADER_W + seconds * self._px_per_s()
+
+    def _seconds_for_x(self, x: float) -> float:
+        return max(0.0, (x - HEADER_W) / self._px_per_s())
+
     def _hit(self, pos: QPointF) -> tuple[int, str]:
+        if pos.y() <= RULER_H:
+            return -1, "scrub"
         for i, rect in self._rects():
             if not rect.adjusted(-2, 0, 2, 0).contains(pos):
                 continue
@@ -118,101 +151,147 @@ class ClipTimelineWidget(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(SURFACE))
 
+        font = QFont(self.font())
+        font.setPointSizeF(8.0)
+        p.setFont(font)
+
+        self._paint_ruler(p)
+        self._paint_headers(p)
+
         clips = self._timeline.clips
         if not clips:
             p.setPen(QColor(TEXT_DIM))
-            p.drawText(self.rect(), Qt.AlignCenter, "クリップがありません")
+            p.drawText(QRectF(HEADER_W, CLIP_TOP, 400, CLIP_H),
+                       Qt.AlignVCenter | Qt.AlignLeft, "  クリップがありません")
             return
 
-        rects = self._rects()
-        font = QFont(self.font())
-        font.setPointSizeF(8.5)
-        p.setFont(font)
+        for i, rect in self._rects():
+            self._paint_clip(p, clips[i], rect, i == self._index)
 
-        for i, rect in rects:
-            clip = clips[i]
-            colour = QColor(event_color(clip.event_kind or ""))
-            if not clip.enabled:
-                colour.setAlpha(60)
-
-            path = QPainterPath()
-            path.addRoundedRect(rect, 6, 6)
-            p.fillPath(path, QColor(SURFACE_2))
-
-            # A coloured cap identifies which event the clip came from.
-            cap = QRectF(rect.left(), rect.top(), rect.width(), 5)
-            capped = QPainterPath()
-            capped.addRoundedRect(cap, 3, 3)
-            p.fillPath(capped, colour)
-
-            selected = i == self._index
-            p.setPen(QPen(QColor(ACCENT_HI if selected else BORDER), 2 if selected else 1))
-            p.drawPath(path)
-
-            if rect.width() > 34:
-                p.setPen(QColor(TEXT if clip.enabled else TEXT_DIM))
-                label = clip.label or (clip.event_kind or "clip")
-                p.drawText(rect.adjusted(6, 10, -6, 0), Qt.AlignTop | Qt.AlignLeft,
-                           label)
-                p.setPen(QColor(TEXT_DIM))
-                p.drawText(rect.adjusted(6, 0, -6, -8),
-                           Qt.AlignBottom | Qt.AlignLeft, f"{clip.duration_s:.1f}s")
-                if clip.fade_in_ms or clip.fade_out_ms:
-                    p.drawText(rect.adjusted(0, 0, -6, -8),
-                               Qt.AlignBottom | Qt.AlignRight, "fade")
-            if not clip.enabled:
-                p.setPen(QPen(QColor(TEXT_DIM), 1, Qt.DashLine))
-                p.drawLine(rect.left() + 4, rect.center().y(),
-                           rect.right() - 4, rect.center().y())
-
-        # Where a dragged clip would land.
         if self._mode == "move" and self._insert_at >= 0:
-            x = 20.0
+            x = float(HEADER_W)
             pps = self._px_per_s()
             for i, clip in enumerate(clips):
                 if i == self._insert_at:
                     break
                 x += max(6.0, clip.duration_s * pps) + 2
             p.setPen(QPen(QColor(ACCENT_HI), 3))
-            p.drawLine(x - 1, CLIP_TOP - 6, x - 1, CLIP_TOP + CLIP_H + 6)
+            p.drawLine(x - 1, CLIP_TOP - 6, x - 1, BGM_TOP + BGM_H + 4)
 
-        # Preview playhead.
-        if self._play_at is not None:
-            idx, ratio = self._play_at
-            for i, rect in rects:
-                if i != idx:
-                    continue
-                x = rect.left() + rect.width() * ratio
-                p.setPen(QPen(QColor("#f87171"), 2))
-                p.drawLine(x, CLIP_TOP - 8, x, CLIP_TOP + CLIP_H + 8)
+        self._paint_bgm(p)
+        self._paint_playhead(p)
+
+    def _paint_ruler(self, p: QPainter) -> None:
+        total = max(1.0, self._timeline.duration_s)
+        p.fillRect(QRectF(0, 0, self.width(), RULER_H), QColor(SURFACE_2))
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.drawLine(0, RULER_H, self.width(), RULER_H)
+
+        pps = self._px_per_s()
+        # Aim for a label roughly every 90px, snapped to a readable interval.
+        for step in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300):
+            if step * pps >= 90:
                 break
-
-        # BGM track.
-        total_w = (rects[-1][1].right() - 20) if rects else 0
-        bgm_rect = QRectF(20, BGM_TOP, max(40.0, total_w), BGM_H)
-        p.setPen(QPen(QColor(BORDER), 1, Qt.DashLine))
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(bgm_rect, 5, 5)
         p.setPen(QColor(TEXT_DIM))
+        t = 0.0
+        while t <= total + step:
+            x = self._x_for_seconds(t)
+            p.drawLine(x, RULER_H - 6, x, RULER_H)
+            p.drawText(QRectF(x + 3, 2, 80, RULER_H - 4),
+                       Qt.AlignVCenter | Qt.AlignLeft, timecode(t))
+            half = self._x_for_seconds(t + step / 2)
+            p.drawLine(half, RULER_H - 3, half, RULER_H)
+            t += step
+
+    def _paint_headers(self, p: QPainter) -> None:
+        p.fillRect(QRectF(0, RULER_H, HEADER_W, self.height() - RULER_H),
+                   QColor(SURFACE_2))
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.drawLine(HEADER_W, RULER_H, HEADER_W, self.height())
+        p.setPen(QColor(TEXT_DIM))
+        p.drawText(QRectF(0, CLIP_TOP, HEADER_W - 8, CLIP_H),
+                   Qt.AlignVCenter | Qt.AlignRight, "V1")
+        p.drawText(QRectF(0, BGM_TOP, HEADER_W - 8, BGM_H),
+                   Qt.AlignVCenter | Qt.AlignRight, "BGM")
+
+    def _paint_clip(self, p: QPainter, clip, rect: QRectF, selected: bool) -> None:
+        colour = QColor(event_color(clip.event_kind or ""))
+        if not clip.enabled:
+            colour.setAlpha(60)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, 5, 5)
+        p.fillPath(path, QColor(SURFACE_2).lighter(112))
+
+        cap = QPainterPath()
+        cap.addRoundedRect(QRectF(rect.left(), rect.top(), rect.width(), 5), 3, 3)
+        p.fillPath(cap, colour)
+
+        p.setPen(QPen(QColor(ACCENT_HI if selected else BORDER), 2 if selected else 1))
+        p.drawPath(path)
+
+        # Fade ramps, drawn as the triangles an editor would show.
+        pps = self._px_per_s()
+        p.setPen(QPen(QColor(TEXT), 1))
+        if clip.fade_in_ms:
+            w = min(rect.width(), clip.fade_in_ms / 1000.0 * pps)
+            p.drawLine(rect.left(), rect.bottom() - 2, rect.left() + w, rect.top() + 7)
+        if clip.fade_out_ms:
+            w = min(rect.width(), clip.fade_out_ms / 1000.0 * pps)
+            p.drawLine(rect.right() - w, rect.top() + 7, rect.right(), rect.bottom() - 2)
+
+        if rect.width() > 40:
+            p.setPen(QColor(TEXT if clip.enabled else TEXT_DIM))
+            p.drawText(rect.adjusted(6, 9, -6, 0), Qt.AlignTop | Qt.AlignLeft,
+                       clip.label or (clip.event_kind or "clip"))
+            p.setPen(QColor(TEXT_DIM))
+            p.drawText(rect.adjusted(6, 0, -6, -6), Qt.AlignBottom | Qt.AlignLeft,
+                       timecode(clip.duration_s))
+        if not clip.enabled:
+            p.setPen(QPen(QColor(TEXT_DIM), 1, Qt.DashLine))
+            p.drawLine(rect.left() + 4, rect.center().y(),
+                       rect.right() - 4, rect.center().y())
+
+    def _paint_bgm(self, p: QPainter) -> None:
+        total = max(1.0, self._timeline.duration_s)
+        rect = QRectF(HEADER_W, BGM_TOP, total * self._px_per_s(), BGM_H)
         bgm = self._timeline.bgm
         if bgm is None:
-            p.drawText(bgm_rect, Qt.AlignCenter, "BGM なし")
-        else:
-            p.fillPath(_rounded(bgm_rect), QColor(ACCENT).darker(160))
-            p.setPen(QColor(TEXT))
-            p.drawText(bgm_rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
-                       f"♪ {Path(bgm.path).name}   音量 {bgm.volume:.0%}")
+            p.setPen(QPen(QColor(BORDER), 1, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rect, 4, 4)
+            return
+        path = QPainterPath()
+        path.addRoundedRect(rect, 4, 4)
+        p.fillPath(path, QColor(ACCENT).darker(170))
+        p.setPen(QPen(QColor(ACCENT), 1))
+        p.drawPath(path)
+        p.setPen(QColor(TEXT))
+        p.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                   f"♪ {Path(bgm.path).name}   {bgm.volume:.0%}")
 
-        p.setPen(QColor(TEXT_DIM))
-        p.drawText(QRectF(20, 6, 400, 20), Qt.AlignVCenter | Qt.AlignLeft,
-                   f"{len(self._timeline.active)} クリップ / "
-                   f"{self._timeline.duration_s:.1f} 秒")
+    def _paint_playhead(self, p: QPainter) -> None:
+        if not self._show_play:
+            return
+        x = self._x_for_seconds(self._play_s)
+        p.setPen(QPen(QColor(PLAYHEAD), 2))
+        p.drawLine(x, RULER_H - 6, x, BGM_TOP + BGM_H + 4)
+        head = QPainterPath()
+        head.moveTo(x - 5, RULER_H - 10)
+        head.lineTo(x + 5, RULER_H - 10)
+        head.lineTo(x, RULER_H - 2)
+        head.closeSubpath()
+        p.fillPath(head, QColor(PLAYHEAD))
 
     # -- interaction --------------------------------------------------------
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
             return
         index, mode = self._hit(event.position())
+        if mode == "scrub":
+            self._mode = "scrub"
+            self.scrubbed.emit(self._seconds_for_x(event.position().x()))
+            return
         self._index = index
         self.selected.emit(index)
         if index < 0:
@@ -231,7 +310,12 @@ class ClipTimelineWidget(QWidget):
         if not self._mode:
             _i, mode = self._hit(pos)
             self.setCursor(Qt.SizeHorCursor if mode.startswith("trim")
-                           else (Qt.OpenHandCursor if mode else Qt.ArrowCursor))
+                           else (Qt.PointingHandCursor if mode == "scrub"
+                                 else (Qt.OpenHandCursor if mode else Qt.ArrowCursor)))
+            return
+
+        if self._mode == "scrub":
+            self.scrubbed.emit(self._seconds_for_x(pos.x()))
             return
 
         clip = self._timeline.clips[self._index]
@@ -239,15 +323,13 @@ class ClipTimelineWidget(QWidget):
         start0, end0 = self._drag_origin
 
         if self._mode == "trim-l":
-            limit = 0.0
             clip.source_start_ms = max(
-                limit, min(start0 + delta_ms, clip.source_end_ms - MIN_CLIP_MS))
+                0.0, min(start0 + delta_ms, clip.source_end_ms - MIN_CLIP_MS))
         elif self._mode == "trim-r":
             limit = self._limits.get(Path(clip.source), end0 + 10_000)
             clip.source_end_ms = min(
                 limit, max(end0 + delta_ms, clip.source_start_ms + MIN_CLIP_MS))
         else:
-            # Reorder: find which slot the pointer is over.
             self._insert_at = self._slot_at(pos.x())
         self._rescale()
         self.update()
@@ -256,7 +338,7 @@ class ClipTimelineWidget(QWidget):
 
     def _slot_at(self, x: float) -> int:
         pps = self._px_per_s()
-        edge = 20.0
+        edge = float(HEADER_W)
         for i, clip in enumerate(self._timeline.clips):
             w = max(6.0, clip.duration_s * pps)
             if x < edge + w / 2:
@@ -282,9 +364,3 @@ class ClipTimelineWidget(QWidget):
             event.accept()
         else:
             event.ignore()
-
-
-def _rounded(rect: QRectF, r: float = 5.0) -> QPainterPath:
-    path = QPainterPath()
-    path.addRoundedRect(rect, r, r)
-    return path
