@@ -301,6 +301,13 @@ class ClipTimelineWidget(QWidget):
         for step in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300):
             if step * pps >= 90:
                 break
+
+        # Times belong over the clips, not over the pinned track-name column. The
+        # column sits at the scroll offset, so the ruler has to stop where it starts
+        # -- otherwise timestamps ride on top of the V1/BGM headers.
+        left = self._scroll_x() + HEADER_W
+        p.save()
+        p.setClipRect(QRectF(left, 0, max(0.0, self.width() - left), RULER_H))
         p.setPen(QColor(TEXT_DIM))
         t = 0.0
         while t <= total + step:
@@ -311,6 +318,7 @@ class ClipTimelineWidget(QWidget):
             half = self._x_for_seconds(t + step / 2)
             p.drawLine(half, RULER_H - 3, half, RULER_H)
             t += step
+        p.restore()
 
     def _scroll_x(self) -> float:
         """How far the track has been scrolled, so the headers can be pinned."""
@@ -469,6 +477,14 @@ class ClipTimelineWidget(QWidget):
         if not self._show_play:
             return
         x = self._x_for_seconds(self._play_s)
+        # Same reasoning as the ruler: never let the playhead stick out over the
+        # pinned column. Below the ruler the header covers it anyway, but the marker
+        # in the ruler row would otherwise float above the track names.
+        left = self._scroll_x() + HEADER_W
+        if x < left:
+            return
+        p.save()
+        p.setClipRect(QRectF(left, 0, max(0.0, self.width() - left), self.height()))
         p.setPen(QPen(QColor(PLAYHEAD), 2))
         p.drawLine(x, RULER_H - 6, x, BGM_TOP + BGM_H + 4)
         head = QPainterPath()
@@ -477,6 +493,7 @@ class ClipTimelineWidget(QWidget):
         head.lineTo(x, RULER_H - 2)
         head.closeSubpath()
         p.fillPath(head, QColor(PLAYHEAD))
+        p.restore()
 
     # -- interaction --------------------------------------------------------
     def _header_hit(self, pos) -> str | None:

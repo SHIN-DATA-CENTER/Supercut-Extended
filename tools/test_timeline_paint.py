@@ -87,6 +87,35 @@ def main() -> int:
                f"the pinned column keeps its own background at offset {offset}",
                f"rgb{head}")
 
+    print("-- the ruler stops at the pinned column --")
+    # Timestamps belong over the clips. They used to be drawn across the full width,
+    # so once the track scrolled they sat on top of the V1/BGM track names.
+    for offset in (0, bar.maximum() // 2, bar.maximum()):
+        bar.setValue(offset)
+        app.processEvents()
+        img = shoot(track)
+        x = track._scroll_x()
+        # Ruler text is TEXT_DIM (#8b98ad) on SURFACE_2 (#171c28): any pixel that
+        # bright inside the corner cell can only be a timestamp or a tick.
+        bright = 0
+        for px in range(int(x) + 2, int(x + HEADER_W) - 2, 2):
+            for py in range(2, 22):
+                r, g, b = colour(img, px, py)
+                if r > 90 and g > 90 and b > 90:
+                    bright += 1
+        expect(bright == 0,
+               f"nothing is drawn above the track names at offset {offset}",
+               f"{bright} bright pixels in the corner")
+        # ...and the ruler is still there where the clips are.
+        lit = 0
+        for px in range(int(x + HEADER_W) + 4, int(x + HEADER_W) + 400, 2):
+            for py in range(2, 22):
+                r, g, b = colour(img, px, py)
+                if r > 90 and g > 90 and b > 90:
+                    lit += 1
+        expect(lit > 0, f"the ruler still labels the clip area at offset {offset}",
+               f"{lit} bright pixels")
+
     print("-- the level bars are drawn inside the pinned column --")
     bar.setValue(bar.maximum())
     app.processEvents()
