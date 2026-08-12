@@ -250,13 +250,13 @@ class ClipTimelineWidget(QWidget):
         p.setFont(font)
 
         self._paint_ruler(p)
-        self._paint_headers(p)
 
         clips = self._timeline.clips
         if not clips:
             p.setPen(QColor(TEXT_DIM))
             p.drawText(QRectF(HEADER_W, CLIP_TOP, 400, CLIP_H),
                        Qt.AlignVCenter | Qt.AlignLeft, "  クリップがありません")
+            self._paint_headers(p)
             return
 
         for i, rect in self._rects():
@@ -271,12 +271,12 @@ class ClipTimelineWidget(QWidget):
             self._paint_ghost(p, clips[self._index])
 
         if self._mode == "move" and self._insert_at >= 0:
-            x = float(HEADER_W)
-            pps = self._px_per_s()
-            for i, clip in enumerate(clips):
-                if i == self._insert_at:
-                    break
-                x += max(6.0, clip.duration_s * pps) + 2
+            # From the same layout the clips use. This had its own copy of the old
+            # "+ 2 per clip" spacing, so the drop marker drifted away from the gap it
+            # was supposed to be pointing at.
+            slots = self._slots()
+            x = (slots[self._insert_at][1] if self._insert_at < len(slots)
+                 else self._span_end())
             p.setPen(QPen(QColor(ACCENT_HI), 3))
             p.drawLine(x - 1, CLIP_TOP - 6, x - 1, BGM_TOP + BGM_H + 4)
 
@@ -285,6 +285,10 @@ class ClipTimelineWidget(QWidget):
             p.setPen(QPen(QColor('#fbbf24'), 1, Qt.DashLine))
             p.drawLine(self._cut_x, CLIP_TOP - 6, self._cut_x, CLIP_TOP + CLIP_H + 6)
         self._paint_playhead(p)
+        # Last, so the pinned column stays on top: it is drawn at the scroll offset
+        # and therefore sits over whatever clips have slid underneath it. Drawn any
+        # earlier and the clips paint straight over the track names.
+        self._paint_headers(p)
 
     def _paint_ruler(self, p: QPainter) -> None:
         total = max(1.0, self._timeline.duration_s)
@@ -316,7 +320,9 @@ class ClipTimelineWidget(QWidget):
     def _vol_rect(self, track: str, offset: float | None = None) -> QRectF:
         """The level bar for a track header, in widget coordinates."""
         x = self._scroll_x() if offset is None else offset
-        top = (CLIP_TOP + CLIP_H - 26) if track == "v1" else (BGM_TOP + BGM_H - 22)
+        # The BGM row is only BGM_H tall, so the bar has to clear the label rather
+        # than sitting on top of it the way there is room to on the V1 row.
+        top = (CLIP_TOP + CLIP_H - 26) if track == "v1" else (BGM_TOP + 20)
         return QRectF(x + 10, top, HEADER_W - 20, 6)
 
     def volume_of(self, track: str) -> float:
