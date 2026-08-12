@@ -29,17 +29,19 @@ from ..encoder import (DEFAULT_QUALITY, QUALITY_TIERS, EncoderSpec,
                        available_encoders, estimate_rate, group_by_engine,
                        vendor_label)
 from ..library import matches_with_highlights, read_matches
-from ..model import HIGHLIGHT_KINDS, Match, Media
+from ..model import HIGHLIGHT_KINDS, Clip, Match, Media, Timeline
 from ..probe import MediaInfo, probe
 from ..render import (RenderError, RenderJob, RenderOptions, render_each,
                       render_many)
 from ..segments import build_segments, total_duration_s
 from . import icons
+from .editor import EditorWindow
 from .i18n import event_label, fmt_duration, language, set_language, tr
 from .player import VideoPlayer
 from .style import ACCENT_HI, TEXT, TEXT_DIM, build_style, checkbox_style
 from .timeline import TimelineWidget, event_color
 from .update_dialog import UpdateCheck, UpdateDialog
+
 
 class LibraryLoader(QThread):
     loaded = Signal(list)
@@ -598,6 +600,12 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setIconSize(QSize(16, 16))
         self.cancel_btn.setVisible(False)
         self.cancel_btn.clicked.connect(self._cancel_render)
+        self.edit_btn = QPushButton(tr("editor.open"))
+        self.edit_btn.setIcon(icons.icon("Edit/Edit_Pencil_01", TEXT, 16))
+        self.edit_btn.setIconSize(QSize(16, 16))
+        self.edit_btn.setEnabled(False)
+        self.edit_btn.clicked.connect(self._open_editor)
+
         self.reveal_btn = QPushButton(tr("btn.reveal"))
         self.reveal_btn.setIcon(icons.icon("File/Folder_Open", TEXT, 16))
         self.reveal_btn.setIconSize(QSize(16, 16))
@@ -607,6 +615,7 @@ class MainWindow(QMainWindow):
         brow = QHBoxLayout()
         brow.addWidget(self.build_btn)
         brow.addWidget(self.cancel_btn)
+        brow.addWidget(self.edit_btn)
         brow.addStretch(1)
         brow.addWidget(self.reveal_btn)
 
@@ -1123,6 +1132,7 @@ class MainWindow(QMainWindow):
             else:
                 self.summary.setText(tr("summary.none"))
             self.build_btn.setEnabled(bool(n_segments) and self._thread is None)
+            self.edit_btn.setEnabled(bool(n_segments))
             return
 
         content = total_duration_s(self._segments)
@@ -1134,6 +1144,7 @@ class MainWindow(QMainWindow):
         else:
             self.summary.setText(tr("summary.none"))
         self.build_btn.setEnabled(bool(self._segments) and self._thread is None)
+        self.edit_btn.setEnabled(bool(self._segments))
 
     def _on_output_edited(self, _text: str) -> None:
         self._output_touched = True
@@ -1244,6 +1255,90 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setVisible(True)
         self.reveal_btn.setEnabled(False)
         self.statusBar().showMessage(tr("status.building"))
+
+    # -- clip editor --------------------------------------------------------
+    def _build_timeline(self) -> tuple[Timeline, dict[Path, float]]:
+        """Seed an editable timeline from what Build would currently produce.
+
+        One clip per *segment*, not per event: segments are what actually get cut, and
+        build_segments() has already merged events whose windows overlap. Seeding per
+        event would show clips that overlap in the source and double up footage.
+        """
+        kinds = self._selected_kinds()
+        use_defaults = self.use_defaults.isChecked()
+        timeline = Timeline()
+        limits: dict[Path, float] = {}
+
+        for match in self._target_matches():
+            media = match.playable_medias[0] if match.playable_medias else None
+            if media is None or media.path is None:
+                continue
+            # The previewed match has a real probe; the rest fall back to the library's
+            # own duration, which is close enough to clamp a trim against.
+            duration_ms = (self._info.duration_ms
+                           if self._media is media and self._info
+                           else media.duration_s * 1000.0)
+            limits[Path(media.path)] = duration_ms
+            segments = build_segments(
+                media.events, kinds=kinds,
+                pre_ms=None if use_defaults else self.pre_spin.value() * 1000,
+                post_ms=None if use_defaults else self.post_spin.value() * 1000,
+                duration_ms=duration_ms or None,
+                gap_ms=self.gap_spin.value() * 1000,
+            )
+            for seg in segments:
+                mid = (seg.start_ms + seg.end_ms) / 2.0
+                near = min((e for e in media.events if e.kind in kinds),
+                           key=lambda e: abs(e.time_ms - mid), default=None)
+                kind = near.kind if near else None
+                stamp = seg.start_ms / 1000.0
+                timeline.clips.append(Clip(
+                    source=Path(media.path),
+                    source_start_ms=seg.start_ms,
+                    source_end_ms=seg.end_ms,
+                    label=f"{event_label(kind) if kind else 'clip'} "
+                          f"{int(stamp // 60)}:{int(stamp % 60):02d}",
+                    event_kind=kind,
+                    event_time_ms=near.time_ms if near else None,
+                ))
+        return timeline, limits
+
+    def _open_editor(self) -> None:
+        timeline, limits = self._build_timeline()
+        if not timeline.clips:
+            QMessageBox.information(self, tr("err.noevents.title"),
+                                    tr("err.noevents.body"))
+            return
+        spec = self._current_spec()
+        if spec is None:
+            QMessageBox.critical(self, tr("err.encoder.title"), tr("err.encoder.body"))
+            return
+
+        out = Path(self.output_edit.text().strip())
+        if self._writing_separate() or not out.name:
+            # The editor always produces one arranged montage, so a folder-shaped
+            # output has no meaning here -- name a file inside it.
+            base = out if out.suffix == "" else out.parent
+            out = base / f"supercut-edited-{datetime.now():%Y%m%d-%H%M%S}.mp4"
+
+        options = RenderOptions(
+            encoder=spec,
+            preset=self.preset_combo.currentData() or spec.default_preset,
+            quality=self.quality_combo.currentData() or DEFAULT_QUALITY,
+            audio=self.audio_combo.currentData() or "0",
+            mode="copy" if self.mode_copy.isChecked() else "encode",
+        )
+
+        self._editor = EditorWindow(timeline, limits, out, options, self)
+        self._editor.rendered.connect(self._on_editor_done, Qt.QueuedConnection)
+        self._editor.show()
+
+    def _on_editor_done(self, result) -> None:
+        self._last_output = Path(result.output)
+        self.reveal_btn.setEnabled(True)
+        self.statusBar().showMessage(tr(
+            "status.done", name=Path(result.output).name, secs=result.elapsed_s,
+            speed=result.speed_x, mb=result.size_bytes / 1e6), 20000)
 
     def _on_progress(self, frac: float, msg: str) -> None:
         self.progress.setValue(int(frac * 100))
