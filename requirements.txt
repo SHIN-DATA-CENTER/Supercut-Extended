@@ -1,0 +1,9 @@
+# GUI (QtSvg is used for the icon set, QtMultimedia for the preview player)
+PySide6>=6.6
+
+# Reads Chromium IndexedDB (LevelDB + V8/Blink structured clone). Not on PyPI under
+# this name, so it is installed straight from the upstream repository.
+ccl_chromium_reader @ git+https://github.com/cclgroupltd/ccl_chromium_reader.git
+
+# ffmpeg / ffprobe are external binaries and must be on PATH (or set SUPERCUT_FFMPEG
+# and SUPERCUT_FFPROBE). They are not pip-installable.
