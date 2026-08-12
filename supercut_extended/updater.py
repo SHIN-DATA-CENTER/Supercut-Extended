@@ -191,6 +191,25 @@ def stage(zip_path: Path) -> Path:
     return payload
 
 
+STAGING_PREFIX = "supercut_update_"
+
+
+def _staging_root(payload: Path) -> Path | None:
+    """The temp directory stage() made, or None if this did not come from stage().
+
+    The cleanup step used to delete ``payload.parent`` outright. When the zip holds
+    the exe at its root -- which is how the release archive is built -- stage()
+    returns the staging directory itself, so that parent is the system temp
+    directory, and the update wiped the whole of %TEMP%.
+
+    Only ever remove a directory we can identify as our own by name.
+    """
+    for candidate in (payload, *payload.parents):
+        if candidate.name.startswith(STAGING_PREFIX):
+            return candidate
+    return None
+
+
 def apply_and_restart(payload: Path) -> None:
     """Hand the swap to a detached batch file, then the caller must exit.
 
@@ -205,6 +224,10 @@ def apply_and_restart(payload: Path) -> None:
     target = app_dir()
     script = Path(tempfile.gettempdir()) / "supercut_apply_update.bat"
     exe = target / EXE_NAME
+    staging = _staging_root(payload)
+    # Skip the cleanup entirely rather than guess: leaving a temp directory behind is
+    # a far smaller problem than deleting the wrong one.
+    cleanup = (f'rmdir /s /q "{staging}" >nul 2>&1\r\n' if staging else "")
 
     script.write_text(
         "@echo off\r\n"
@@ -222,7 +245,7 @@ def apply_and_restart(payload: Path) -> None:
         f'  echo Update failed. & pause & exit /b 1\r\n'
         f')\r\n'
         f'start "" "{exe}"\r\n'
-        f'rmdir /s /q "{payload.parent}" >nul 2>&1\r\n'
+        + cleanup +
         f'del "%~f0" >nul 2>&1\r\n',
         encoding="utf-8",
     )

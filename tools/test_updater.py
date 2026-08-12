@@ -75,7 +75,23 @@ def main() -> int:
     except RuntimeError:
         expect(True, "a zip without the exe is rejected")
 
+    print("-- cleanup never escapes the staging directory --")
+    # The bug this guards: stage() returns the staging dir itself when the exe sits at
+    # the zip root, and the cleanup step deleted payload.parent -- i.e. all of %TEMP%.
+    expect(updater._staging_root(payload) == payload,
+           "a root-level payload cleans up itself, not its parent",
+           f"{updater._staging_root(payload)}")
+    nested = updater.stage(nested_zip)
+    expect(updater._staging_root(nested) == nested.parent,
+           "a nested payload cleans up the staging dir above it")
+    expect(updater._staging_root(Path(tempfile.gettempdir()) / "somewhere") is None,
+           "a path that did not come from stage() is never deleted")
+
     print("-- the real swap, against a fake install --")
+    # A bystander directly in %TEMP%: if cleanup ever escapes again, this dies.
+    bystander = Path(tempfile.gettempdir()) / "supercut_bystander_do_not_delete.txt"
+    bystander.write_text("must survive the update")
+
     install = work / "install"
     install.mkdir()
     (install / updater.EXE_NAME).write_text("OLD BUILD")
@@ -95,20 +111,39 @@ def main() -> int:
     finally:
         updater.app_dir, os.getpid = real_app_dir, real_getpid
 
+    def contents(path: Path) -> str | None:
+        """None while the file is missing or locked.
+
+        robocopy replaces rather than rewrites, so there is a window where the target
+        does not exist. Reading straight through that window makes this test fail on
+        timing alone, which is exactly the kind of noise that gets a real failure
+        waved away later.
+        """
+        try:
+            return path.read_text()
+        except OSError:
+            return None
+
     deadline = time.time() + 45
     while time.time() < deadline:
-        if (install / updater.EXE_NAME).read_text() == "NEW BUILD":
+        if contents(install / updater.EXE_NAME) == "NEW BUILD":
             break
         time.sleep(0.5)
 
-    expect((install / updater.EXE_NAME).read_text() == "NEW BUILD",
+    expect(contents(install / updater.EXE_NAME) == "NEW BUILD",
            "the exe was actually replaced",
-           (install / updater.EXE_NAME).read_text())
-    expect((install / "SupercutExtended-cli.exe").read_text() == "NEW CLI",
+           str(contents(install / updater.EXE_NAME)))
+    expect(contents(install / "SupercutExtended-cli.exe") == "NEW CLI",
            "the CLI exe was replaced too")
     expect((install / "extra.txt").is_file(), "new files in the payload arrive")
-    expect((install / "settings.local").read_text() == "keep me",
+    expect(contents(install / "settings.local") == "keep me",
            "files not in the payload are left alone (robocopy /E merges, not mirrors)")
+
+    expect(bystander.is_file(),
+           "an unrelated file in %TEMP% survived the update")
+    expect(not payload.exists(), "the staging directory was cleaned up")
+    expect(Path(tempfile.gettempdir()).is_dir(), "%TEMP% itself still exists")
+    bystander.unlink(missing_ok=True)
 
     print("\n" + ("updater OK" if not failures
                   else f"{len(failures)} CHECK(S) FAILED: {failures}"))
