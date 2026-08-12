@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .encoder import EncoderSpec, decode_args, video_args
-from .model import Bgm, Segment, Timeline
+from .model import Bgm, Framing, Segment, Timeline
 from .probe import MediaInfo, _NO_WINDOW, ffmpeg_path, probe
 
 ProgressFn = Callable[[float, str], None]
@@ -46,6 +46,7 @@ class RenderOptions:
     audio: str = "0"          # track index, "all", "mix" or "none"
     workers: int = 2
     keep_temp: bool = False
+    framing: Framing = field(default_factory=Framing)
     mode: str = "encode"      # "encode" (Outplayed-equivalent) or "copy"
 
 
@@ -163,7 +164,11 @@ def _segment_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
     # than shuttle them back and forth with hwdownload/hwupload, decode this clip on the
     # CPU; the encode -- which is the expensive half -- still runs on the GPU.
     video_fades = _fade_chain("fade", fade_in_s, fade_out_s, seg.duration_s)
-    if video_fades:
+    framing = _framing_filters(opts, info)
+    # crop/pad/setsar have no CUDA equivalent in the bundled build (only scale_cuda
+    # does), so any framing work drops decoding back to the CPU. The encode -- the
+    # expensive half -- still runs on the GPU.
+    if video_fades or framing:
         hwaccel = False
 
     cmd = [ffmpeg_path(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
@@ -171,8 +176,9 @@ def _segment_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
         cmd += decode_args(opts.encoder)
     cmd += ["-ss", f"{seg.start_s:.6f}", "-i", str(src), "-t", f"{seg.duration_s:.6f}"]
     cmd += ["-map", "0:v:0"]
-    if video_fades:
-        cmd += ["-vf", ",".join(video_fades)]
+    chain = framing + video_fades
+    if chain:
+        cmd += ["-vf", ",".join(chain)]
     cmd += _audio_args(opts.audio, info, fade_in_s=fade_in_s, fade_out_s=fade_out_s,
                        duration_s=seg.duration_s)
     cmd += video_args(opts.encoder, preset=opts.preset, quality=opts.quality,
@@ -181,6 +187,27 @@ def _segment_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
     cmd += ["-fps_mode", "cfr", "-video_track_timescale", "60000"]
     cmd += ["-progress", "pipe:1", "-nostats", str(dst)]
     return cmd
+
+
+def _framing_filters(opts: RenderOptions, info: MediaInfo) -> list[str]:
+    """crop/scale/pad chain for the requested framing, in that order."""
+    fr = opts.framing
+    if not fr.active:
+        return []
+    parts = []
+    if fr.crops:
+        x, y, w, h = fr.source_rect(info.width, info.height)
+        parts.append(f"crop={w}:{h}:{x}:{y}")
+    if fr.resizes:
+        w, h = fr.output_size(info.width, info.height)
+        if fr.stretch:
+            # Ignore aspect ratio on purpose: fill the frame, distortion and all.
+            parts.append(f"scale={w}:{h}")
+        else:
+            parts.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease")
+            parts.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")
+    parts.append("setsar=1")
+    return parts
 
 
 def _stream_shape(info: MediaInfo, opts: RenderOptions) -> tuple:
@@ -195,7 +222,9 @@ def _stream_shape(info: MediaInfo, opts: RenderOptions) -> tuple:
     if opts.mode == "copy":
         video: tuple = (info.video_codec, info.pix_fmt, info.width, info.height, fps)
     else:
-        video = (info.width, info.height, fps)
+        # Framing resizes every source to the same frame, so recordings that would
+        # otherwise refuse to join become compatible.
+        video = (*opts.framing.output_size(info.width, info.height), fps)
 
     n = len(info.audio)
     if n == 0 or opts.audio == "none":

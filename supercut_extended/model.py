@@ -217,6 +217,70 @@ class Clip:
         return Segment(start_ms=self.source_start_ms, end_ms=self.source_end_ms)
 
 
+@dataclass(frozen=True)
+class Framing:
+    """How the source is fitted into the output frame.
+
+    ``crop_*`` removes pixels from each edge of the SOURCE before anything else. It
+    exists for recordings where the game rendered 4:3 inside a 16:9 capture: the
+    pillarbox is baked into the video, so the only way to fill the frame is to cut the
+    bars off and resize what is left.
+
+    ``stretch`` decides what happens when the cropped picture and the output frame
+    disagree on shape -- distort to fill, or fit and pad. Distorting is usually wrong,
+    which is why it is off by default, but it is exactly what someone who plays 4:3
+    stretched wants their montage to look like.
+    """
+
+    width: int | None = None          # None keeps whatever the source is
+    height: int | None = None
+    crop_left: int = 0
+    crop_right: int = 0
+    crop_top: int = 0
+    crop_bottom: int = 0
+    stretch: bool = False
+
+    @property
+    def crops(self) -> bool:
+        return bool(self.crop_left or self.crop_right
+                    or self.crop_top or self.crop_bottom)
+
+    @property
+    def resizes(self) -> bool:
+        return self.width is not None and self.height is not None
+
+    @property
+    def active(self) -> bool:
+        return self.crops or self.resizes
+
+    def source_rect(self, width: int, height: int) -> tuple[int, int, int, int]:
+        """The kept region of a source frame, as (x, y, w, h)."""
+        x = max(0, self.crop_left)
+        y = max(0, self.crop_top)
+        w = max(16, width - x - max(0, self.crop_right))
+        h = max(16, height - y - max(0, self.crop_bottom))
+        return x, y, w, h
+
+    def output_size(self, width: int, height: int) -> tuple[int, int]:
+        if self.resizes:
+            return int(self.width), int(self.height)
+        _x, _y, w, h = self.source_rect(width, height)
+        # Encoders reject odd dimensions on 4:2:0.
+        return w - (w % 2), h - (h % 2)
+
+
+# Common output sizes, plus "leave it alone" as the default.
+RESOLUTION_PRESETS: tuple[tuple[str, int | None, int | None], ...] = (
+    ("ソースのまま", None, None),
+    ("1920 x 1080 (FHD)", 1920, 1080),
+    ("2560 x 1440 (QHD)", 2560, 1440),
+    ("3840 x 2160 (4K)", 3840, 2160),
+    ("1280 x 720 (HD)", 1280, 720),
+    ("1080 x 1080 (正方形)", 1080, 1080),
+    ("1080 x 1920 (縦)", 1080, 1920),
+)
+
+
 @dataclass
 class Bgm:
     """Background music laid under the whole montage."""
