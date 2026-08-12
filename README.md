@@ -42,10 +42,24 @@ Outplayed は録画も手動エクスポートも既に GPU を使っている�
 
 ## 使い方
 
-### exe 版（ビルド済み）
+### インストーラー版（推奨）
 
-**`SupercutExtended.exe`** を起動するだけ。
+**`SupercutExtended-v*-setup.exe`** を実行するだけ。
 ※前提としてOutPlayedを利用していること。
+
+- スタートメニューに登録され、「アプリと機能」からアンインストールできる
+- **管理者権限は不要**（UAC が出ない）
+- インストール先は `%LOCALAPPDATA%\Programs\SupercutExtended`
+
+Program Files ではなくユーザー領域に入れているのは意図的で、**Program Files だと
+アプリ内の自動更新が動かなくなる**ため。更新はインストール先のファイルを置き換える
+処理なので、書き込みに管理者権限が要る場所には置けない。
+
+アンインストールしても**設定は残す**（ユーザーのデータなので消さない）。
+
+### zip 版（展開して使う）
+
+インストールせずに持ち運びたい場合はこちら。アプリ内の自動更新もこの zip を使う。
 
 zip を展開すると `SupercutExtended` フォルダが出てくる。中身は:
 
@@ -72,8 +86,13 @@ libx264 / libx265 / NVENC / AMD AMF / Intel QSV の H.264・HEVC が全部有効
 ```bash
 pip install -r requirements.txt
 python tools/fetch_ffmpeg.py             # vendor/ffmpeg/ に ffmpeg.exe 等を取得（初回のみ）
+python tools/make_icon.py                # assets/app.ico を生成（初回のみ）
 python -m PyInstaller supercut.spec --noconfirm --clean
+python tools/build_installer.py          # インストーラーも作る場合（Inno Setup 6 が必要）
 ```
+
+`build_installer.py` はバージョンを `supercut_extended/__init__.py` から読むので、
+インストーラーとアプリの表示が食い違うことはない。出力は `dist/` に置かれる。
 
 #### 単体 exe とフォルダ配布の切り替え
 
