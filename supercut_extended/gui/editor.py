@@ -26,6 +26,7 @@ from ..render import RenderError, RenderOptions, RenderResult, render_timeline
 from . import icons
 from .clip_timeline import ClipTimelineWidget
 from .i18n import event_label, tr
+from .player import VideoPlayer
 from .style import ACCENT_HI, TEXT, build_style
 
 
@@ -73,7 +74,7 @@ class EditorWindow(QDialog):
         self.setWindowTitle(tr("editor.title"))
         self.setStyleSheet(build_style())
         self.setWindowIcon(icons.app_icon())
-        self.resize(1180, 660)
+        self.resize(1180, 940)
         # A dialog that is not modal: the main window stays usable while editing.
         self.setModal(False)
         self.setWindowFlag(Qt.Window, True)
@@ -85,6 +86,8 @@ class EditorWindow(QDialog):
         self._thread: QThread | None = None
         self._worker: TimelineWorker | None = None
         self._loading = False
+        self._preview_index = -1
+        self._loaded_source: Path | None = None
 
         self._build()
         self.track.set_timeline(self._timeline, self._limits)
@@ -122,6 +125,15 @@ class EditorWindow(QDialog):
         hint.setWordWrap(True)
         outer.addWidget(hint)
 
+        self.player = VideoPlayer()
+        self.player.positionChanged.connect(self._on_position)
+        self.player.setMinimumHeight(300)
+        outer.addWidget(self.player, 1)
+
+        note = QLabel(tr("editor.preview_note"))
+        note.setObjectName("captionLabel")
+        outer.addWidget(note)
+
         self.track = ClipTimelineWidget()
         self.track.changed.connect(self._on_track_changed)
         self.track.selected.connect(self._on_select)
@@ -132,7 +144,6 @@ class EditorWindow(QDialog):
         scroll.setMinimumHeight(200)
         scroll.setMaximumHeight(260)
         outer.addWidget(scroll)
-        outer.addStretch(1)
 
         outer.addLayout(self._build_clip_panel())
         outer.addLayout(self._build_bgm_panel())
@@ -240,7 +251,55 @@ class EditorWindow(QDialog):
         clips = self._timeline.clips
         return clips[i] if 0 <= i < len(clips) else None
 
+    # -- preview ------------------------------------------------------------
+    def _cue(self, index: int, play: bool = False) -> None:
+        """Point the preview at a clip, loading its recording only if it changed.
+
+        Reloading the same file would restart it from zero and stutter every time the
+        selection moves between clips cut from one recording.
+        """
+        clips = self._timeline.clips
+        if not (0 <= index < len(clips)):
+            return
+        clip = clips[index]
+        self._preview_index = index
+        source = Path(clip.source)
+        if source != self._loaded_source:
+            self.player.load(source)
+            self._loaded_source = source
+        self.player.seek(clip.start_s)
+        self.track.set_playhead(index, 0.0)
+        if play:
+            self.player.toggle()
+
+    def _on_position(self, seconds: float) -> None:
+        """Run the clips as one sequence: at a clip's out point, jump to the next.
+
+        This is what makes the preview show the montage rather than the recording --
+        the arrangement only exists here, since nothing has been rendered yet.
+        """
+        i = self._preview_index
+        clips = self._timeline.clips
+        if not (0 <= i < len(clips)):
+            return
+        clip = clips[i]
+        ms = seconds * 1000.0
+        if clip.duration_ms > 0:
+            self.track.set_playhead(
+                i, (ms - clip.source_start_ms) / clip.duration_ms)
+
+        if ms < clip.source_end_ms:
+            return
+        for j in range(i + 1, len(clips)):
+            if clips[j].enabled and clips[j].duration_ms > 0:
+                self._cue(j)
+                return
+        self.player.stop()
+        self.track.set_playhead(-1, 0.0)
+
     def _on_select(self, index: int) -> None:
+        if index >= 0:
+            self._cue(index)
         clip = self._current()
         # Writing the widgets fires their signals; _loading stops that being read back
         # as a user edit and clobbering the clip we are only displaying.
@@ -394,6 +453,7 @@ class EditorWindow(QDialog):
             self._worker.cancel.set()
 
     def closeEvent(self, event) -> None:
+        self.player.stop()
         if self._worker:
             self._worker.cancel.set()
         self._teardown()

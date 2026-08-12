@@ -53,6 +53,12 @@ class ClipTimelineWidget(QWidget):
         self._drag_from = 0.0
         self._drag_origin: tuple[float, float] = (0.0, 0.0)
         self._insert_at = -1
+        self._play_at: tuple[int, float] | None = None   # (clip index, 0..1 through it)
+
+    def set_playhead(self, index: int, ratio: float) -> None:
+        """Show where preview playback has reached, as a position inside one clip."""
+        self._play_at = None if index < 0 else (index, max(0.0, min(1.0, ratio)))
+        self.update()
 
     # -- data ---------------------------------------------------------------
     def set_timeline(self, timeline: Timeline, limits: dict[Path, float]) -> None:
@@ -169,6 +175,17 @@ class ClipTimelineWidget(QWidget):
                 x += max(6.0, clip.duration_s * pps) + 2
             p.setPen(QPen(QColor(ACCENT_HI), 3))
             p.drawLine(x - 1, CLIP_TOP - 6, x - 1, CLIP_TOP + CLIP_H + 6)
+
+        # Preview playhead.
+        if self._play_at is not None:
+            idx, ratio = self._play_at
+            for i, rect in rects:
+                if i != idx:
+                    continue
+                x = rect.left() + rect.width() * ratio
+                p.setPen(QPen(QColor("#f87171"), 2))
+                p.drawLine(x, CLIP_TOP - 8, x, CLIP_TOP + CLIP_H + 8)
+                break
 
         # BGM track.
         total_w = (rects[-1][1].right() - 20) if rects else 0
