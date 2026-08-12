@@ -27,6 +27,7 @@ from ..model import Bgm, Clip, Timeline
 from ..render import RenderError, RenderOptions, RenderResult, render_timeline
 from . import icons
 from .clip_timeline import ClipTimelineWidget, timecode
+from .controls import NoScrollDoubleSpinBox, NoScrollSlider
 from .i18n import event_label, tr
 from .player import VideoPlayer
 from .style import build_style
@@ -57,7 +58,8 @@ class TimelineWorker(QObject):
 
 def _spin(lo: float, hi: float, val: float, suffix: str = " s",
           step: float = 0.1) -> QDoubleSpinBox:
-    s = QDoubleSpinBox(minimum=lo, maximum=hi, singleStep=step, suffix=suffix)
+    s = NoScrollDoubleSpinBox(minimum=lo, maximum=hi, singleStep=step,
+                              suffix=suffix)
     s.setDecimals(2)
     s.setValue(val)
     s.setMinimumWidth(92)
@@ -295,7 +297,7 @@ class EditorWindow(QDialog):
         lay.addLayout(brow)
 
         lay.addWidget(_field_label(tr("editor.volume")))
-        self.vol = QSlider(Qt.Horizontal)
+        self.vol = NoScrollSlider(Qt.Horizontal)
         self.vol.setRange(0, 100)
         self.vol.setValue(25)
         self.vol.valueChanged.connect(self._on_bgm_change)

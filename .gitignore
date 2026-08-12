@@ -25,6 +25,11 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+# PyInstaller is often pointed at a scratch --distpath/--workpath to build while an
+# older exe is still running. Those are build output too, and a 114 MB one-file exe
+# committed by accident is not something you can take back out of a clone.
+build[-_]*/
+dist[-_]*/
 downloads/
 eggs/
 .eggs/

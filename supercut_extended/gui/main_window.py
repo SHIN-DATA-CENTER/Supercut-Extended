@@ -36,6 +36,8 @@ from ..render import (RenderError, RenderJob, RenderOptions, render_each,
                       render_many)
 from ..segments import build_segments, total_duration_s
 from . import icons
+from .controls import (NoScrollComboBox, NoScrollDoubleSpinBox,
+                       NoScrollSpinBox)
 from .editor import EditorWindow
 from .i18n import event_label, fmt_duration, language, set_language, tr
 from .player import VideoPlayer
@@ -707,8 +709,13 @@ class MainWindow(QMainWindow):
         self.frame_note = caption(tr("frame.note"))
         self.frame_note.setVisible(False)
 
+        # A field label, not caption(): captions are indented to sit under a radio
+        # button, which left this heading hanging off to the right of every other
+        # sub-heading in the column.
+        title = QLabel(tr("frame.title"))
+        title.setObjectName("fieldLabel")
         return block(
-            caption(tr("frame.title")),
+            title,
             self._field(tr("frame.resolution"), self.res_combo),
             self.custom_row,
             crop_caption, crop_grid, self.detect_btn,
@@ -718,7 +725,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _px_spin(hi: int, val: int) -> QSpinBox:
-        spin = QSpinBox(minimum=0, maximum=hi, suffix=" px")
+        spin = NoScrollSpinBox(minimum=0, maximum=hi, suffix=" px")
         spin.setValue(val)
         spin.setMinimumWidth(64)
         spin.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -732,7 +739,7 @@ class MainWindow(QMainWindow):
         "OBS Audio Handler (aac, 2ch)" sets a minimum width for the whole panel and
         forces a horizontal scrollbar.
         """
-        combo = QComboBox()
+        combo = NoScrollComboBox()
         combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo.setMinimumContentsLength(6)
         if fixed:
@@ -755,7 +762,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _spin(lo: float, hi: float, val: float) -> QDoubleSpinBox:
-        s = QDoubleSpinBox(suffix=" s", minimum=lo, maximum=hi, singleStep=0.5)
+        s = NoScrollDoubleSpinBox(suffix=" s", minimum=lo, maximum=hi,
+                                  singleStep=0.5)
         s.setValue(val)
         s.setMinimumWidth(96)
         return s

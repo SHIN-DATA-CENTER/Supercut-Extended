@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from ..model import Framing
 from . import icons
+from .controls import NoScrollSlider
 from .i18n import tr
 from .style import BORDER, TEXT, TEXT_DIM
 
@@ -169,7 +170,7 @@ class VideoPlayer(QWidget):
         self.volume_icon = QLabel()
         self.volume_icon.setPixmap(icons.pixmap("Media/Volume_Max", TEXT_DIM, 18))
 
-        self.volume = QSlider(Qt.Horizontal)
+        self.volume = NoScrollSlider(Qt.Horizontal)
         self.volume.setRange(0, 100)
         self.volume.setValue(70)
         self.volume.setFixedWidth(110)
