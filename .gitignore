@@ -1,7 +1,5 @@
 指示書.txt
 
-requirements.txt
-
 # Icons Folder
 cooliocns SVG/
 assets/
@@ -46,10 +44,10 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
+#   The stock template ignores *.spec on the assumption that a script generates it.
+#   supercut.spec is not generated -- it is the hand-written build definition, and
+#   without it a fresh clone cannot produce a release build at all. It stays tracked.
 *.manifest
-*.spec
 
 # Installer logs
 pip-log.txt
