@@ -128,6 +128,32 @@ def main() -> int:
            "stretching shows the same picture edge as cropping alone",
            f"{left_edge_brightness(out):.1f} vs {stretched_edge:.1f}")
 
+    print("\n-- output frame rate --")
+    src_fps = probe(src).fps
+    expect(abs(src_fps - 60.0) < 0.1, "the test source is 60 fps", f"{src_fps:.2f}")
+    for want in (30.0, 120.0):
+        out = WORK / f"fps{want:g}.mp4"
+        timeline = Timeline(clips=[Clip(src, 0, 2000, "A")])
+        opts = RenderOptions(encoder=available_encoders()[0], workers=1, audio="0",
+                             fps=want)
+        render_timeline(timeline, out, opts)
+        got = probe(out)
+        expect(abs(got.fps - want) < 0.1, f"output really runs at {want:g} fps",
+               f"{got.fps:.2f}")
+        # Re-timing must not turn into a speed change: the montage has to stay the
+        # length it says it is.
+        expect(abs(got.duration_s - 2.0) < 0.15,
+               f"at {want:g} fps the clip is still its own length",
+               f"{got.duration_s:.2f}s")
+
+    out = WORK / "fps_source.mp4"
+    timeline = Timeline(clips=[Clip(src, 0, 2000, "A")])
+    render_timeline(timeline, out,
+                    RenderOptions(encoder=available_encoders()[0], workers=1,
+                                  audio="0"))
+    expect(abs(probe(out).fps - src_fps) < 0.1,
+           "no fps setting keeps the source rate", f"{probe(out).fps:.2f}")
+
     print("\n" + ("framing OK" if not failures
                   else f"{len(failures)} CHECK(S) FAILED: {failures}"))
     return 1 if failures else 0

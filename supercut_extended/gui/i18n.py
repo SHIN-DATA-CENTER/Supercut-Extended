@@ -95,6 +95,8 @@ STRINGS: dict[str, dict[str, str]] = {
 
         "frame.title": "画面サイズ・黒帯",
         "frame.resolution": "出力解像度",
+        "frame.fps": "フレームレート",
+        "frame.fps.desc": "ソースより高くしてもなめらかにはなりません（同じ絵が増えるだけ）。低くするとファイルは小さくなります。",
         "frame.custom": "カスタム...",
         "frame.width": "幅",
         "frame.height": "高さ",
@@ -297,6 +299,8 @@ STRINGS: dict[str, dict[str, str]] = {
 
         "frame.title": "Frame size & black bars",
         "frame.resolution": "Output resolution",
+        "frame.fps": "Frame rate",
+        "frame.fps.desc": "Going above the source rate does not add smoothness -- it duplicates frames. Going below makes the file smaller.",
         "frame.custom": "Custom...",
         "frame.width": "Width",
         "frame.height": "Height",

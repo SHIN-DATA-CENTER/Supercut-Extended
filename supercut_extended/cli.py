@@ -267,8 +267,12 @@ def cmd_build(args: argparse.Namespace) -> int:
         encoder=spec, preset=args.preset or spec.default_preset,
         quality=args.quality, max_rate_kbps=args.max_rate,
         audio=args.audio, workers=args.workers, mode=args.mode,
-        framing=framing,
+        framing=framing, fps=args.fps,
     )
+    if args.fps and args.mode == "copy":
+        # A stream copy passes packets through untouched, so there is nothing that
+        # could change the rate. Say so rather than writing the source rate silently.
+        raise SystemExit("--fps needs --mode encode (a stream copy cannot re-time)")
     if framing.active:
         print(f"  framing  {_framing_summary(framing)}")
     if opts.mode == "copy":
@@ -367,6 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--crop", help="black bars to cut off, in source pixels: "
                                   "'240' (all edges), '240,240' (left,right) or "
                                   "'240,240,0,0' (left,right,top,bottom)")
+    p.add_argument("--fps", type=float,
+                   help="output frame rate, e.g. 30 / 60 / 120 "
+                        "(default: keep the source rate)")
     p.add_argument("--stretch", action="store_true",
                    help="fill --size instead of padding, changing the aspect ratio "
                         "(for a 4:3 game recorded inside a 16:9 capture)")

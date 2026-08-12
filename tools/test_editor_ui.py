@@ -122,6 +122,36 @@ def main() -> int:
             win._clear_bgm()
             expect(timeline.bgm is None, "music can be removed")
 
+            print("-- clips line up with the time axis --")
+            # The gap between clips used to be added to the next clip's offset, so
+            # every clip drifted 2px further right than the one before and the last
+            # one overhung the end of its own timeline by 2px x clip count.
+            track.set_timeline(timeline, limits)
+            rects = dict(track._rects())
+            for i in range(len(timeline.clips)):
+                want = track._x_for_seconds(timeline.start_of(i))
+                expect(abs(rects[i].left() - want) < 0.51,
+                       f"clip {i + 1} starts where the ruler says it does",
+                       f"{rects[i].left():.1f} vs {want:.1f}")
+            end_x = track._x_for_seconds(timeline.duration_s)
+            last = rects[len(timeline.clips) - 1]
+            expect(last.right() <= end_x + 0.51,
+                   "the last clip does not overhang the end of the sequence",
+                   f"clip ends {last.right():.1f}, sequence ends {end_x:.1f}")
+            expect(track.minimumWidth() >= end_x,
+                   "the widget is wide enough for the whole sequence",
+                   f"{track.minimumWidth()} >= {end_x:.0f}")
+
+            print("-- an excluded clip keeps its place but not its time --")
+            timeline.clips[0].enabled = False
+            rects = dict(track._rects())
+            expect(rects[1].left() > rects[0].left(),
+                   "the clip after an excluded one is still drawn after it")
+            expect(abs(track._x_for_seconds(0.0) - rects[1].left()) < 0.51,
+                   "sequence time 0 now points at the first *included* clip",
+                   f"{track._x_for_seconds(0.0):.1f} vs {rects[1].left():.1f}")
+            timeline.clips[0].enabled = True
+
             print("-- reaching the end of the sequence --")
             # Playing to the end used to call player.stop(), which drops the source.
             # After that _loaded_source still named the file, so _cue() decided there

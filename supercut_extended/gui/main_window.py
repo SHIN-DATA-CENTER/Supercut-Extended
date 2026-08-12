@@ -29,8 +29,8 @@ from ..encoder import (DEFAULT_QUALITY, QUALITY_TIERS, EncoderSpec,
                        available_encoders, estimate_rate, group_by_engine,
                        vendor_label)
 from ..library import matches_with_highlights, read_matches
-from ..model import (HIGHLIGHT_KINDS, RESOLUTION_PRESETS, Clip, Framing, Match,
-                     Media, Timeline)
+from ..model import (FPS_PRESETS, HIGHLIGHT_KINDS, RESOLUTION_PRESETS, Clip,
+                     Framing, Match, Media, Timeline)
 from ..probe import MediaInfo, detect_black_bars, probe
 from ..render import (RenderError, RenderJob, RenderOptions, render_each,
                       render_many)
@@ -663,6 +663,11 @@ class MainWindow(QMainWindow):
         exact 4:3 pillar people expect. The detect button fills these in from the
         footage, so nobody has to count pixels by hand.
         """
+        self.fps_combo = self._combo()
+        for label, value in FPS_PRESETS:
+            self.fps_combo.addItem(label, value)
+        self.fps_combo.currentIndexChanged.connect(self._on_framing_changed)
+
         self.res_combo = self._combo()
         for label, w, h in RESOLUTION_PRESETS:
             self.res_combo.addItem(label, (w, h))
@@ -718,6 +723,8 @@ class MainWindow(QMainWindow):
             title,
             self._field(tr("frame.resolution"), self.res_combo),
             self.custom_row,
+            self._field(tr("frame.fps"), self.fps_combo),
+            caption(tr("frame.fps.desc")),
             crop_caption, crop_grid, self.detect_btn,
             self.stretch_box, caption(tr("frame.stretch.desc")),
             self.frame_note,
@@ -844,6 +851,9 @@ class MainWindow(QMainWindow):
             self.res_h.blockSignals(False)
         self._on_framing_changed()
 
+    def _current_fps(self) -> float | None:
+        return self.fps_combo.currentData()
+
     def _current_framing(self) -> Framing:
         data = self.res_combo.currentData()
         if data == "custom":
@@ -958,6 +968,10 @@ class MainWindow(QMainWindow):
         for key, spin in self.crop_spins.items():
             spin.setValue(int(s.value(key, 0)))
         self.stretch_box.setChecked(s.value("stretch", "false") == "true")
+        fps = float(s.value("fps", 0) or 0)
+        i = self.fps_combo.findData(fps if fps else None)
+        if i >= 0:
+            self.fps_combo.setCurrentIndex(i)
         # Not _on_framing_changed: the custom width/height row also has to be shown or
         # hidden to match the preset that was just restored.
         self._on_resolution_changed()
@@ -985,6 +999,7 @@ class MainWindow(QMainWindow):
         for key, spin in self.crop_spins.items():
             s.setValue(key, spin.value())
         s.setValue("stretch", "true" if self.stretch_box.isChecked() else "false")
+        s.setValue("fps", self.fps_combo.currentData() or 0)
 
     # -- library ------------------------------------------------------------
     def _load_library(self) -> None:
@@ -1433,6 +1448,7 @@ class MainWindow(QMainWindow):
             audio=self.audio_combo.currentData() or "0",
             mode="copy" if self.mode_copy.isChecked() else "encode",
             framing=self._current_framing(),
+            fps=self._current_fps(),
         )
         use_defaults = self.use_defaults.isChecked()
         plan = BatchPlan(
@@ -1537,6 +1553,7 @@ class MainWindow(QMainWindow):
             audio=self.audio_combo.currentData() or "0",
             mode="copy" if self.mode_copy.isChecked() else "encode",
             framing=self._current_framing(),
+            fps=self._current_fps(),
         )
 
         self._editor = EditorWindow(timeline, limits, out, options, self)

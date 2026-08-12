@@ -139,31 +139,86 @@ class ClipTimelineWidget(QWidget):
         self.update()
 
     def _rescale(self) -> None:
-        total = max(1.0, self._timeline.duration_s)
-        self.setMinimumWidth(int(HEADER_W + total * self._px_per_s()) + 30)
+        self.setMinimumWidth(int(self._span_end()) + 30)
 
     def _px_per_s(self) -> float:
-        total = max(1.0, self._timeline.duration_s)
+        # Scale to the drawn span, which counts excluded clips too -- otherwise
+        # "全体表示" leaves whatever is excluded hanging off the right edge.
+        span = max(1.0, sum(c.duration_s for c in self._timeline.clips))
         viewport = (self.parent().width() if self.parent() else 900) - HEADER_W - 40
-        fit = max(MIN_PX_PER_S, viewport / total)
+        fit = max(MIN_PX_PER_S, viewport / span)
         return fit * self._zoom
 
     # -- geometry -----------------------------------------------------------
-    def _rects(self) -> list[tuple[int, QRectF]]:
-        out = []
-        x = float(HEADER_W)
+    #
+    # Clips are placed at their true position along the track and the gap between
+    # them is taken out of the *width*, never added to the next clip's offset.
+    # Advancing x by "width + gap" made every clip drift right by 2px more than the
+    # last, so a 13-clip sequence ended 26px past its own playhead -- the clips
+    # visibly overhung the end of the timeline.
+    GAP = 2.0
+
+    def _slots(self) -> list[tuple[int, float, float]]:
+        """(index, left, width) for every clip, disabled ones included.
+
+        Excluded clips keep their place on the track -- the inspector calls it
+        "使用する" precisely so a clip can be dropped from the output without losing
+        its position -- so they take up room here even though they contribute
+        nothing to the sequence length.
+        """
         pps = self._px_per_s()
+        out: list[tuple[int, float, float]] = []
+        x = float(HEADER_W)
         for i, clip in enumerate(self._timeline.clips):
             w = max(6.0, clip.duration_s * pps)
-            out.append((i, QRectF(x, CLIP_TOP, w, CLIP_H)))
-            x += w + 2
+            out.append((i, x, w))
+            x += w
         return out
 
+    def _span_end(self) -> float:
+        slots = self._slots()
+        if not slots:
+            return HEADER_W + max(1.0, self._timeline.duration_s) * self._px_per_s()
+        i, x, w = slots[-1]
+        return x + w
+
+    def _rects(self) -> list[tuple[int, QRectF]]:
+        return [(i, QRectF(x, CLIP_TOP, max(4.0, w - self.GAP), CLIP_H))
+                for i, x, w in self._slots()]
+
     def _x_for_seconds(self, seconds: float) -> float:
-        return HEADER_W + seconds * self._px_per_s()
+        """Sequence seconds -> pixels, stepping over clips excluded from the output.
+
+        The playhead is given a position in the *rendered* sequence, which skips
+        disabled clips; the track draws every clip. Walking both together is what
+        keeps the playhead on the clip it is actually inside.
+        """
+        pps = self._px_per_s()
+        remaining = max(0.0, seconds)
+        x = float(HEADER_W)
+        for i, clip in enumerate(self._timeline.clips):
+            w = max(6.0, clip.duration_s * pps)
+            if clip.enabled and clip.duration_ms > 0:
+                if remaining <= clip.duration_s:
+                    return x + remaining * pps
+                remaining -= clip.duration_s
+            x += w
+        return x
 
     def _seconds_for_x(self, x: float) -> float:
-        return max(0.0, (x - HEADER_W) / self._px_per_s())
+        pps = self._px_per_s()
+        left = float(x)
+        seconds = 0.0
+        for i, slot_x, w in self._slots():
+            clip = self._timeline.clips[i]
+            if left < slot_x + w:
+                inside = max(0.0, left - slot_x) / pps
+                if clip.enabled and clip.duration_ms > 0:
+                    return seconds + min(inside, clip.duration_s)
+                return seconds
+            if clip.enabled and clip.duration_ms > 0:
+                seconds += clip.duration_s
+        return seconds
 
     def _hit(self, pos: QPointF) -> tuple[int, str]:
         if pos.y() <= RULER_H:
@@ -326,7 +381,7 @@ class ClipTimelineWidget(QWidget):
 
     def _paint_bgm(self, p: QPainter) -> None:
         total = max(1.0, self._timeline.duration_s)
-        rect = QRectF(HEADER_W, BGM_TOP, total * self._px_per_s(), BGM_H)
+        rect = QRectF(HEADER_W, BGM_TOP, self._span_end() - HEADER_W, BGM_H)
         bgm = self._timeline.bgm
         if bgm is None:
             p.setPen(QPen(QColor(BORDER), 1, Qt.DashLine))

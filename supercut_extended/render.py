@@ -47,6 +47,7 @@ class RenderOptions:
     workers: int = 2
     keep_temp: bool = False
     framing: Framing = field(default_factory=Framing)
+    fps: float | None = None  # None keeps whatever the source runs at
     mode: str = "encode"      # "encode" (Outplayed-equivalent) or "copy"
 
 
@@ -184,6 +185,10 @@ def _segment_cmd(src: Path, seg: Segment, dst: Path, opts: RenderOptions,
     cmd += video_args(opts.encoder, preset=opts.preset, quality=opts.quality,
                       max_rate_kbps=opts.max_rate_kbps,
                       hw_frames=hwaccel and bool(decode_args(opts.encoder)))
+    # An explicit rate goes after the filters so it applies to the output, not the
+    # decode. cfr already forces a constant rate; -r decides which one.
+    if opts.fps:
+        cmd += ["-r", f"{opts.fps:g}"]
     cmd += ["-fps_mode", "cfr", "-video_track_timescale", "60000"]
     cmd += ["-progress", "pipe:1", "-nostats", str(dst)]
     return cmd
@@ -218,7 +223,7 @@ def _stream_shape(info: MediaInfo, opts: RenderOptions) -> tuple:
     inherits width/height/fps from whatever it was fed. A stream copy normalises
     nothing at all, so every property comes straight from the source.
     """
-    fps = round(info.fps, 2)
+    fps = round(opts.fps if opts.fps else info.fps, 2)
     if opts.mode == "copy":
         video: tuple = (info.video_codec, info.pix_fmt, info.width, info.height, fps)
     else:

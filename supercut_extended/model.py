@@ -270,6 +270,17 @@ class Framing:
 
 
 # Common output sizes, plus "leave it alone" as the default.
+# Output frame rates offered in the UI. "source" keeps whatever the recording runs
+# at, which is the right default: re-timing costs quality and time for nothing when
+# the capture is already the rate you want.
+FPS_PRESETS: tuple[tuple[str, float | None], ...] = (
+    ("ソースのまま", None),
+    ("30 FPS", 30.0),
+    ("60 FPS", 60.0),
+    ("120 FPS", 120.0),
+)
+
+
 RESOLUTION_PRESETS: tuple[tuple[str, int | None, int | None], ...] = (
     ("ソースのまま", None, None),
     ("1920 x 1080 (FHD)", 1920, 1080),
