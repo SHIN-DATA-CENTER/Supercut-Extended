@@ -55,6 +55,12 @@ class TimelineWidget(QWidget):
         self._segments: list[Segment] = []
         self._playhead_s = 0.0
         self._hover_x: float | None = None
+        # Zoom shows a window of the recording instead of all of it. A 30 minute
+        # capture squeezes an hour of kills into a few hundred pixels, so at 1x the
+        # markers overlap into a solid bar and there is no way to see a single event.
+        self._zoom = 1.0
+        self._view_start_s = 0.0
+        self._pan_from: tuple[float, float] | None = None
         self.setMinimumHeight(int(SEG_H + EV_H + RULER_H + PAD * 2 + 6))
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -63,9 +69,16 @@ class TimelineWidget(QWidget):
     # -- data ---------------------------------------------------------------
     def set_data(self, duration_s: float, events: list[GameEvent],
                  segments: list[Segment]) -> None:
+        first = abs(self._duration_s - max(0.0, duration_s)) > 0.01
         self._duration_s = max(0.0, duration_s)
         self._events = list(events)
         self._segments = list(segments)
+        if first:
+            # A different recording: start from the whole thing rather than keeping a
+            # window that pointed into the previous one.
+            self._zoom = 1.0
+            self._view_start_s = 0.0
+        self._clamp_view()
         self.update()
 
     def set_playhead(self, seconds: float) -> None:
@@ -77,6 +90,49 @@ class TimelineWidget(QWidget):
     def event_times(self) -> list[float]:
         return sorted(e.time_ms / 1000.0 for e in self._events)
 
+    # -- zoom ---------------------------------------------------------------
+    def zoom(self) -> float:
+        return self._zoom
+
+    def view_start_s(self) -> float:
+        return self._view_start_s
+
+    def view_span_s(self) -> float:
+        """How many seconds are on screen."""
+        if self._duration_s <= 0:
+            return 1.0
+        return self._duration_s / self._zoom
+
+    def _clamp_view(self) -> None:
+        span = self.view_span_s()
+        self._view_start_s = max(0.0, min(self._view_start_s,
+                                          max(0.0, self._duration_s - span)))
+
+    def set_zoom(self, zoom: float, anchor_s: float | None = None) -> None:
+        """Zoom, keeping `anchor_s` under the same pixel it was already at.
+
+        Anchoring on the pointer is what makes wheel-zoom feel like a map rather than
+        a slider: without it the region you were looking at slides out from under you.
+        """
+        old_span = self.view_span_s()
+        if anchor_s is None:
+            anchor_s = self._view_start_s + old_span / 2.0
+        frac = ((anchor_s - self._view_start_s) / old_span) if old_span > 0 else 0.5
+        self._zoom = max(1.0, min(zoom, 400.0))
+        self._view_start_s = anchor_s - frac * self.view_span_s()
+        self._clamp_view()
+        self.update()
+
+    def pan_seconds(self, delta_s: float) -> None:
+        self._view_start_s += delta_s
+        self._clamp_view()
+        self.update()
+
+    def reset_zoom(self) -> None:
+        self._zoom = 1.0
+        self._view_start_s = 0.0
+        self.update()
+
     # -- geometry -----------------------------------------------------------
     def _track(self) -> QRectF:
         return QRectF(PAD, PAD, max(1.0, self.width() - PAD * 2),
@@ -86,14 +142,16 @@ class TimelineWidget(QWidget):
         r = self._track()
         if self._duration_s <= 0:
             return r.left()
-        return r.left() + (seconds / self._duration_s) * r.width()
+        span = self.view_span_s()
+        return r.left() + ((seconds - self._view_start_s) / span) * r.width()
 
     def _seconds_for(self, x: float) -> float:
         r = self._track()
         if r.width() <= 0 or self._duration_s <= 0:
             return 0.0
         frac = (x - r.left()) / r.width()
-        return max(0.0, min(self._duration_s, frac * self._duration_s))
+        secs = self._view_start_s + frac * self.view_span_s()
+        return max(0.0, min(self._duration_s, secs))
 
     # -- painting -----------------------------------------------------------
     def paintEvent(self, _event) -> None:
@@ -144,9 +202,13 @@ class TimelineWidget(QWidget):
         p.setFont(font)
         fm = QFontMetrics(font)
         if self._duration_s > 0:
-            step = self._nice_step(self._duration_s)
-            t = 0.0
-            while t <= self._duration_s:
+            # Step from the visible span, not the whole recording: at 20x a 30 minute
+            # capture would otherwise still be labelled every 5 minutes, i.e. never.
+            span = self.view_span_s()
+            step = self._nice_step(span)
+            t = max(0.0, (self._view_start_s // step) * step)
+            end = min(self._duration_s, self._view_start_s + span)
+            while t <= end:
                 x = self._x_for(t)
                 label = f"{int(t) // 60}:{int(t) % 60:02d}"
                 w = fm.horizontalAdvance(label)
@@ -180,7 +242,7 @@ class TimelineWidget(QWidget):
 
     @staticmethod
     def _nice_step(duration_s: float) -> float:
-        for step in (15, 30, 60, 120, 300, 600, 900, 1800):
+        for step in (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800):
             if duration_s / step <= 12:
                 return float(step)
         return 3600.0
@@ -190,6 +252,14 @@ class TimelineWidget(QWidget):
         if self._duration_s <= 0:
             return
         x = event.position().x()
+        if self._pan_from is not None:
+            from_x, from_start = self._pan_from
+            r = self._track()
+            per_px = self.view_span_s() / max(1.0, r.width())
+            self._view_start_s = from_start - (x - from_x) * per_px
+            self._clamp_view()
+            self.update()
+            return
         self._hover_x = x
         secs = self._seconds_for(x)
 
@@ -214,6 +284,37 @@ class TimelineWidget(QWidget):
         self._hover_x = None
         self.update()
 
+    def wheelEvent(self, event) -> None:
+        """Ctrl = zoom at the pointer, Alt = pan. Same keys as the clip editor."""
+        if self._duration_s <= 0:
+            event.ignore()
+            return
+        mods = event.modifiers()
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if mods & Qt.ControlModifier:
+            anchor = self._seconds_for(event.position().x())
+            self.set_zoom(self._zoom * (1.25 if delta > 0 else 0.8), anchor)
+            event.accept()
+        elif mods & Qt.AltModifier:
+            self.pan_seconds(-delta / 120.0 * self.view_span_s() * 0.15)
+            event.accept()
+        else:
+            event.ignore()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """Back to the whole recording -- the way out of being lost while zoomed."""
+        if event.button() == Qt.LeftButton:
+            self.reset_zoom()
+
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MiddleButton and self._duration_s > 0:
+            self._pan_from = (event.position().x(), self._view_start_s)
+            self.setCursor(Qt.ClosedHandCursor)
+            return
         if event.button() == Qt.LeftButton and self._duration_s > 0:
             self.seekRequested.emit(self._seconds_for(event.position().x()))
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MiddleButton and self._pan_from is not None:
+            self._pan_from = None
+            self.setCursor(Qt.PointingHandCursor)

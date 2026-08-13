@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .. import __version__, updater
@@ -36,12 +37,14 @@ from ..render import (RenderError, RenderJob, RenderOptions, render_each,
                       render_many)
 from ..segments import build_segments, total_duration_s
 from . import icons
+from .about_dialog import AboutDialog
 from .controls import (NoScrollComboBox, NoScrollDoubleSpinBox,
                        NoScrollSpinBox)
 from .editor import EditorWindow
 from .i18n import event_label, fmt_duration, language, set_language, tr
 from .player import VideoPlayer
-from .style import ACCENT_HI, TEXT, TEXT_DIM, build_style, checkbox_style
+from .style import (ACCENT_HI, TEXT, TEXT_DIM, TEXT_FAINT, build_style,
+                    checkbox_style)
 from .timeline import TimelineWidget, event_color
 from .update_dialog import UpdateCheck, UpdateDialog
 
@@ -330,8 +333,7 @@ class MainWindow(QMainWindow):
                 tr("update.uptodate", version=__version__), 8000)
 
     def _show_about(self) -> None:
-        QMessageBox.information(self, tr("menu.about"),
-                                tr("about.body", version=__version__))
+        AboutDialog(self).exec()
 
     def _build_left(self) -> QWidget:
         """Match list on top, every control beneath it.
@@ -445,22 +447,10 @@ class MainWindow(QMainWindow):
         offset. The section headers already do the visual separating that the separate
         cards used to.
         """
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        # Everything in here must fit the column width; growing sideways
-        # and hiding controls behind a scrollbar is never the right answer.
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        inner = QWidget()
-        lay = QVBoxLayout(inner)
-        lay.setContentsMargins(0, 0, 8, 0)
-        lay.setSpacing(18)
-
         # --- events
         self.kinds_layout = QGridLayout()
         self.kinds_layout.setSpacing(6)
-        lay.addWidget(block(section(tr("group.events"), "Interface/Filter"),
-                            self.kinds_layout))
+        events_tab = [block(self.kinds_layout)]
 
         # --- timing
         self.use_defaults = QCheckBox(tr("timing.defaults"))
@@ -486,8 +476,7 @@ class MainWindow(QMainWindow):
             cell.addWidget(spin)
             trow.addLayout(cell)
         trow.addStretch(1)
-        lay.addWidget(block(section(tr("group.timing"), "Interface/Slider_01"),
-                            self.use_defaults, trow))
+        timing_tab = [block(self.use_defaults, trow, caption(tr("timing.hint")))]
 
         # --- output
         self.mode_encode = QRadioButton(tr("out.mode.encode"))
@@ -591,17 +580,29 @@ class MainWindow(QMainWindow):
         # Wider spacing than the 4-8px used inside each sub-block, so "mode",
         # "processing", "quality type" and the preset/quality row read as distinct
         # questions rather than one dense list of radio buttons.
-        lay.addWidget(block(
-            section(tr("group.output"), "Interface/Download"),
+        output_tab = [block(
             mode_block,
             engine_block,
             codec_block,
             speed_quality_block,
             self._field(tr("out.audio"), self.audio_combo),
             self._build_framing_block(),
-            shape_block,
-            ocol,
-            spacing=14))
+            spacing=14)]
+        dest_tab = [block(shape_block, ocol, spacing=14)]
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        # Tabs along the bottom, the way OBS puts them: the panel is a tall narrow
+        # column, so the tab strip sits next to the action buttons it leads to
+        # rather than floating above a long scroll.
+        self.tabs.setTabPosition(QTabWidget.South)
+        for key, icon_name, contents in (
+                ("group.events", "Interface/Filter", events_tab),
+                ("group.timing", "Interface/Slider_01", timing_tab),
+                ("group.output", "Interface/Download", output_tab),
+                ("group.dest", "File/Folder_Open", dest_tab)):
+            self.tabs.addTab(self._settings_tab(contents), icons.icon(icon_name, TEXT_DIM, 15),
+                             tr(key))
 
         # --- action
         self.summary = QLabel("")
@@ -639,21 +640,42 @@ class MainWindow(QMainWindow):
         brow.addStretch(1)
         brow.addWidget(self.reveal_btn)
 
-        lay.addStretch(1)
-        scroll.setWidget(inner)
-
         holder = QWidget()
         outer = QVBoxLayout(holder)
         outer.setContentsMargins(12, 6, 6, 12)
         outer.setSpacing(10)
-        # Zero right margin: the scrollbar then sits flush against the card's inner
-        # border, exactly where the table's own scrollbar sits inside its frame, so
-        # the two bars line up on the same pixel column.
-        outer.addWidget(card(scroll, margins=(14, 12, 0, 12)), 1)
+        # Zero right margin: each tab's scrollbar then sits flush against the card's
+        # inner border, exactly where the table's own scrollbar sits inside its frame,
+        # so the two bars line up on the same pixel column.
+        outer.addWidget(card(self.tabs, margins=(10, 8, 0, 10)), 1)
         outer.addWidget(card(self.summary, self.progress, brow))
 
         self._populate_encoders()
         return holder
+
+    @staticmethod
+    def _settings_tab(contents: list[QWidget]) -> QWidget:
+        """One tab: its own scroll area, so a long tab does not stretch the others.
+
+        Each tab scrolls independently rather than the whole panel scrolling as one
+        column -- which is the point of splitting them up. Horizontal scrolling stays
+        off: everything has to fit the column width, and hiding a control behind a
+        sideways scrollbar is never the right answer.
+        """
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(2, 2, 8, 2)
+        lay.setSpacing(16)
+        for widget in contents:
+            lay.addWidget(widget)
+        lay.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        return scroll
 
     def _build_framing_block(self) -> QWidget:
         """Output resolution, black-bar crop and the stretch filter.
@@ -1191,9 +1213,13 @@ class MainWindow(QMainWindow):
         # The legend labels the timeline, which only ever shows the previewed
         # recording, so it stays tied to that rather than to the whole selection.
         shown = (self._media.event_counts() if self._media else counts) or counts
-        self.legend.setText("　".join(
+        marks = "　".join(
             f"<span style='color:{event_color(k).name()}'>&#9632;</span> {event_label(k)}"
-            for k in shown))
+            for k in shown)
+        # The zoom keys are not discoverable on a bare strip, and a 30 minute capture
+        # is unreadable at 1x, so the legend carries the hint.
+        self.legend.setText(
+            f"{marks}<br><span style='color:{TEXT_FAINT}'>{tr('timeline.zoom_hint')}</span>")
 
     def _rebuild_audio(self, info: MediaInfo) -> None:
         self.audio_combo.clear()

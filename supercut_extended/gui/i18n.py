@@ -41,12 +41,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "group.events": "対象イベント",
         "group.timing": "クリップの長さ",
         "group.output": "出力",
+        "group.dest": "保存先",
         "group.preview": "プレビュー",
+        "timeline.zoom_hint": "Ctrl+ホイール=拡大縮小 / Alt+ホイール または 中ボタンドラッグ=左右に移動 / ダブルクリック=全体に戻す",
 
         "timing.defaults": "Outplayed のイベント別デフォルトを使う",
         "timing.before": "前",
         "timing.after": "後",
         "timing.gap": "結合間隔",
+        "timing.hint": "未指定のときは、イベントの種類ごとに Outplayed が持っている前後の秒数をそのまま使います。",
 
         "out.method": "方式",
         "out.mode.encode": "再エンコード",
@@ -198,7 +201,22 @@ STRINGS: dict[str, dict[str, str]] = {
         "menu.help": "ヘルプ",
         "menu.check_update": "アップデートを確認",
         "menu.about": "バージョン情報",
-        "about.body": "Supercut Extended {version}\n\nOutplayed の Supercut を GPU (NVENC) で作り直すツール",
+        "about.version": "バージョン {version}",
+        "about.description":
+            "Outplayed が検出したハイライトを、<b>GPU（NVENC）で書き出し直す</b>ツールです。<br><br>"
+            "イベントの検出と録画は Outplayed のものをそのまま使い、"
+            "<b>結合とエンコードの工程だけ</b>を置き換えます。Outplayed 本体は Supercut を "
+            "CPU の libx264 で処理しており、長い montage では時間切れで打ち切られることがあります。"
+            "<br><br>"
+            "クリップの並べ替え・長さ調整・フェード・BGM を扱う簡易編集画面と、"
+            "出力解像度・黒帯のカット・フレームレートの指定も備えています。",
+        "about.repo": "GitHub リポジトリ",
+        "about.releases": "リリース一覧",
+        "about.ffmpeg":
+            "ffmpeg 8.1.2（gyan.dev ビルド）を同梱しています。ffmpeg は <b>GPLv3</b> で"
+            "配布されており、全文と再配布上の注意は同梱の "
+            "<code>LICENSE-FFmpeg-GPLv3.txt</code> と <code>NOTICE.txt</code> にあります。",
+        "about.copyright": "© 2026 SHIN DATA CENTER",
         "update.title": "アップデート",
         "update.available": "新しいバージョンがあります\n\n現在: {current}  →  最新: {latest}",
         "update.nonotes": "（リリースノートはありません）",
@@ -245,12 +263,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "group.events": "Include events",
         "group.timing": "Clip timing",
         "group.output": "Output",
+        "group.dest": "Destination",
         "group.preview": "Preview",
+        "timeline.zoom_hint": "Ctrl+wheel=zoom / Alt+wheel or middle-drag=pan / double-click=fit",
 
         "timing.defaults": "Use Outplayed's per-event defaults",
         "timing.before": "before",
         "timing.after": "after",
         "timing.gap": "merge gap",
+        "timing.hint": "Left alone, each event keeps the before/after seconds Outplayed itself uses for that event kind.",
 
         "out.method": "Method",
         "out.mode.encode": "Re-encode",
@@ -403,7 +424,23 @@ STRINGS: dict[str, dict[str, str]] = {
         "menu.help": "Help",
         "menu.check_update": "Check for updates",
         "menu.about": "About",
-        "about.body": "Supercut Extended {version}\n\nGPU (NVENC) replacement for Outplayed's Supercut",
+        "about.version": "Version {version}",
+        "about.description":
+            "Re-renders the highlights Outplayed detects, <b>on the GPU (NVENC)</b>."
+            "<br><br>"
+            "Event detection and recording stay with Outplayed; only the "
+            "<b>joining and encoding</b> are replaced. Outplayed runs its own Supercut "
+            "through libx264 on the CPU, which times out and truncates long montages."
+            "<br><br>"
+            "Includes a clip editor for reordering, trimming, fades and music, plus "
+            "control over output resolution, black-bar cropping and frame rate.",
+        "about.repo": "GitHub repository",
+        "about.releases": "Releases",
+        "about.ffmpeg":
+            "Bundles ffmpeg 8.1.2 (gyan.dev build). ffmpeg is distributed under the "
+            "<b>GPLv3</b>; the full text and redistribution notes ship with the app as "
+            "<code>LICENSE-FFmpeg-GPLv3.txt</code> and <code>NOTICE.txt</code>.",
+        "about.copyright": "© 2026 SHIN DATA CENTER",
         "update.title": "Update",
         "update.available": "A new version is available\n\nCurrent: {current}  →  Latest: {latest}",
         "update.nonotes": "(no release notes)",

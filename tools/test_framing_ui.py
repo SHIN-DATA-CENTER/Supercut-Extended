@@ -70,6 +70,11 @@ def run(win: MainWindow) -> None:
     expect(win.player.framing() == framing, "the preview follows the setting")
 
     print("-- custom size --")
+    # The framing controls live on the output tab now. A widget on a tab that is not
+    # current is not "visible" no matter how it is configured, so open it first --
+    # which is what a user does before touching these anyway.
+    win.tabs.setCurrentIndex(2)
+    QApplication.processEvents()
     pick(win, "カスタム")
     expect(win.custom_row.isVisible(), "width/height row appears")
     expect((win.res_w.value(), win.res_h.value()) == (1280, 720),

@@ -1,0 +1,178 @@
+"""The v1.4.0 additions: tabbed settings, preview-timeline zoom, the About box.
+
+    python tools/test_v140_ui.py
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+from supercut_extended import __version__                      # noqa: E402
+from supercut_extended.gui.about_dialog import AboutDialog     # noqa: E402
+from supercut_extended.gui.i18n import tr                      # noqa: E402
+from supercut_extended.gui.main_window import MainWindow       # noqa: E402
+from supercut_extended.gui.timeline import TimelineWidget      # noqa: E402
+
+failures: list[str] = []
+
+
+def expect(cond: bool, label: str, detail: str = "") -> None:
+    print(f"  {'PASS' if cond else 'FAIL'}: {label}" + (f"  [{detail}]" if detail else ""))
+    if not cond:
+        failures.append(label)
+
+
+def wheel(widget, x: float, mods, clicks: int = 1) -> None:
+    pos = QPointF(x, widget.height() / 2)
+    delta = QPoint(0, 120 * clicks)
+    QApplication.sendEvent(widget, QWheelEvent(
+        pos, widget.mapToGlobal(pos), delta, delta,
+        Qt.NoButton, mods, Qt.NoScrollPhase, False))
+
+
+def check_tabs(win: MainWindow) -> None:
+    print("-- the settings are split into four tabs --")
+    tabs = win.tabs
+    labels = [tabs.tabText(i) for i in range(tabs.count())]
+    expect(labels == [tr("group.events"), tr("group.timing"),
+                      tr("group.output"), tr("group.dest")],
+           "four tabs, in the order the work happens", " / ".join(labels))
+
+    # Each tab scrolls on its own; a shared scroll area would defeat the split.
+    areas = [tabs.widget(i) for i in range(tabs.count())]
+    expect(all(isinstance(a, QScrollArea) for a in areas),
+           "every tab scrolls independently")
+    expect(len({id(a) for a in areas}) == 4, "and they are four separate areas")
+
+    print("-- every control still reaches the render --")
+    # The controls moved between parents; what matters is that the accessors the
+    # render path uses still find them.
+    for name, getter in (
+            ("対象イベント", lambda: win._selected_kinds()),
+            ("クリップの長さ", lambda: win.pre_spin.value()),
+            ("出力", lambda: win._current_framing()),
+            ("フレームレート", lambda: win._current_fps()),
+            ("保存先", lambda: win.output_edit.text())):
+        try:
+            getter()
+            expect(True, f"{name} は読み取れる")
+        except Exception as exc:                      # noqa: BLE001
+            expect(False, f"{name} は読み取れる", repr(exc))
+
+    print("-- switching tabs does not disturb the settings --")
+    before = (win._current_framing(), win._current_fps(), win._selected_kinds())
+    for i in range(tabs.count()):
+        tabs.setCurrentIndex(i)
+        QApplication.processEvents()
+    after = (win._current_framing(), win._current_fps(), win._selected_kinds())
+    expect(before == after, "values survive a walk through every tab")
+
+    # The custom width/height row follows the resolution choice. Asserted against the
+    # choice rather than against "hidden", because these settings are restored from
+    # the user's own config and may legitimately already be on Custom.
+    tabs.setCurrentIndex(2)
+    QApplication.processEvents()
+    win.res_combo.setCurrentIndex(win.res_combo.findData("custom"))
+    QApplication.processEvents()
+    expect(win.custom_row.isVisible(),
+           "picking Custom reveals the width/height row inside its tab")
+    win.res_combo.setCurrentIndex(0)
+    QApplication.processEvents()
+    expect(not win.custom_row.isVisible(),
+           "picking a preset hides it again")
+
+
+def check_timeline_zoom() -> None:
+    print("-- the preview timeline zooms --")
+    tl = TimelineWidget()
+    tl.resize(800, 90)
+    tl.set_data(1800.0, [], [])
+    expect(tl.zoom() == 1.0, "starts showing the whole recording")
+    expect(abs(tl.view_span_s() - 1800.0) < 0.01, "span is the full duration")
+
+    mid = tl._seconds_for(400.0)
+    wheel(tl, 400.0, Qt.ControlModifier, +1)
+    expect(tl.zoom() > 1.0, "ctrl+wheel zooms in", f"{tl.zoom():.2f}x")
+    expect(abs(tl._seconds_for(400.0) - mid) < 1.0,
+           "the moment under the pointer stays under the pointer",
+           f"{mid:.1f}s -> {tl._seconds_for(400.0):.1f}s")
+
+    start = tl.view_start_s()
+    wheel(tl, 400.0, Qt.AltModifier, -1)
+    expect(tl.view_start_s() > start, "alt+wheel pans along the recording",
+           f"{start:.1f}s -> {tl.view_start_s():.1f}s")
+
+    tl.set_zoom(100.0, anchor_s=1800.0)
+    expect(tl.view_start_s() + tl.view_span_s() <= 1800.01,
+           "the window never runs off the end of the recording",
+           f"{tl.view_start_s():.1f}+{tl.view_span_s():.1f}")
+    tl.set_zoom(0.1)
+    expect(tl.zoom() == 1.0, "cannot zoom out past the whole recording",
+           f"{tl.zoom():.2f}x")
+
+    tl.set_zoom(8.0, anchor_s=900.0)
+    tl.reset_zoom()
+    expect(tl.zoom() == 1.0 and tl.view_start_s() == 0.0, "reset shows everything")
+
+    # Seeking has to report real timestamps while zoomed, not view-relative ones.
+    tl.set_zoom(4.0, anchor_s=900.0)
+    left_edge = tl._seconds_for(tl._track().left())
+    expect(abs(left_edge - tl.view_start_s()) < 1.0,
+           "the left edge maps to where the window starts",
+           f"{left_edge:.1f}s vs {tl.view_start_s():.1f}s")
+
+    print("-- a new recording starts unzoomed --")
+    tl.set_data(600.0, [], [])
+    expect(tl.zoom() == 1.0 and tl.view_start_s() == 0.0,
+           "loading another match resets the view")
+
+
+def check_about(win: MainWindow) -> None:
+    print("-- the about box says who made it and what it bundles --")
+    dlg = AboutDialog(win)
+    texts = [w.text() for w in dlg.findChildren(QLabel)]
+    joined = "\n".join(texts)
+    expect(__version__ in joined, "shows the running version", __version__)
+    expect("SHIN DATA CENTER" in joined, "carries the copyright")
+    expect("github.com/" in joined and "href=" in joined,
+           "links to the repository")
+    expect("GPLv3" in joined,
+           "names the ffmpeg licence it redistributes under")
+    expect(len(tr("about.description")) > 100,
+           "the description is a real description, not one line",
+           f"{len(tr('about.description'))} chars")
+    dlg.deleteLater()
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+
+    def go() -> None:
+        if win.table.rowCount() == 0 or win._info is None:
+            QTimer.singleShot(500, go)
+            return
+        try:
+            check_tabs(win)
+            check_timeline_zoom()
+            check_about(win)
+        finally:
+            print("\n" + ("v1.4.0 UI OK" if not failures
+                          else f"{len(failures)} CHECK(S) FAILED: {failures}"))
+            app.exit(1 if failures else 0)
+
+    QTimer.singleShot(800, go)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
