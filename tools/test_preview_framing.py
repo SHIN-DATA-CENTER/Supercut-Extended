@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, QPoint, QTimer
+from PySide6.QtCore import QEventLoop, QPoint, QPointF, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
@@ -186,13 +186,16 @@ def main() -> int:
     player.set_framing(Framing(width=1920, height=1080, crop_left=240, crop_right=240))
     settle(600)
     shot = player.grab().toImage()
-    frame = view.mapFromScene(view._scene.sceneRect()).boundingRect()
-    # 5% into the frame, not 3px: cropping 240 off each side of 1920 leaves padding
-    # 12.5% of the frame wide, so this is comfortably inside it -- while +3px sat in
-    # the rounding error of mapFromScene and landed outside the frame about half the
-    # time, failing on timing rather than on behaviour.
-    inside = view.mapTo(player, QPoint(int(frame.left() + frame.width() * 0.05),
-                                       view.height() // 2))
+    # Pick the sample in SCENE coordinates and map it out, rather than deriving it
+    # from the mapped bounding rect. Cropping 240 off each side of 1920 leaves padding
+    # 12.5% of the frame wide, so 5% in is padding by construction -- whereas working
+    # back from boundingRect() carried its rounding, and under load the widget
+    # geometry could still be a frame behind, so the point fell outside the frame and
+    # the check failed on timing instead of on behaviour.
+    scene_rect = view._scene.sceneRect()
+    pad_point = QPointF(scene_rect.left() + scene_rect.width() * 0.05,
+                        scene_rect.center().y())
+    inside = view.mapTo(player, view.mapFromScene(pad_point))
     inside_edge = QImage.pixelColor(shot, inside.x(), inside.y())
     expect(inside_edge.red() < 40 and inside_edge.blue() < 60,
            "real output padding is drawn black inside the frame",

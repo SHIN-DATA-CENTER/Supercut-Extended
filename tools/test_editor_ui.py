@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from supercut_extended.encoder import DEFAULT_QUALITY, available_encoders  # noqa: E402
+from supercut_extended.gui.clip_timeline import HEADER_W                   # noqa: E402
 from supercut_extended.gui.editor import EditorWindow                      # noqa: E402
 from supercut_extended.model import Bgm, Clip, Timeline                    # noqa: E402
 from supercut_extended.render import RenderOptions                         # noqa: E402
@@ -185,8 +186,36 @@ def main() -> int:
             expect(dur < 60_000, "not the 60s dummy recording's own length",
                    f"{dur:.2f}s")
 
+            print("-- zooming keeps the playhead in the middle --")
+            area = track._scroller()
+            bar = area.horizontalScrollBar()
+            middle_s = timeline.duration_s / 2.0
+            track.set_playhead_seconds(middle_s)
+            for factor in (4.0, 8.0):
+                track.set_zoom(factor)
+                QApplication.processEvents()      # the deferred centring runs here
+                track.centre_on_playhead()
+                shown = bar.value() + (area.viewport().width() + HEADER_W) / 2.0
+                want = track._x_for_seconds(middle_s)
+                expect(abs(shown - want) < 3.0 or bar.value() in (0, bar.maximum()),
+                       f"at {factor:g}x the playhead is centred (or the track is at "
+                       f"an end)", f"centre x={shown:.0f} vs playhead x={want:.0f}")
+
+            print("-- playback that runs off the edge pulls the view along --")
+            track.set_zoom(8.0)
+            QApplication.processEvents()
+            bar.setValue(0)
+            track.set_playhead_seconds(timeline.duration_s * 0.9)
+            QApplication.processEvents()
+            x = track._x_for_seconds(timeline.duration_s * 0.9)
+            expect(bar.value() + HEADER_W <= x <= bar.value() + area.viewport().width(),
+                   "the playhead is dragged back into view",
+                   f"x={x:.0f} in {bar.value() + HEADER_W}.."
+                   f"{bar.value() + area.viewport().width()}")
+            track.fit()
+            QApplication.processEvents()
+
             print("-- track headers stay put when the track scrolls --")
-            from supercut_extended.gui.clip_timeline import HEADER_W
             area = track._scroller()
             expect(area is not None, "the track knows which scroll area holds it")
             bar = area.horizontalScrollBar()

@@ -99,13 +99,48 @@ def check_timeline_zoom() -> None:
     expect(tl.zoom() == 1.0, "starts showing the whole recording")
     expect(abs(tl.view_span_s() - 1800.0) < 0.01, "span is the full duration")
 
-    mid = tl._seconds_for(400.0)
+    print("-- zoom is centred on the playhead --")
+    tl.set_playhead(1200.0)
+    for factor in (2.0, 4.0, 8.0, 40.0):
+        tl.set_zoom(factor)
+        centre = tl.view_start_s() + tl.view_span_s() / 2.0
+        expect(abs(centre - 1200.0) < 0.05,
+               f"at {factor:g}x the playhead is the middle of the window",
+               f"centre {centre:.1f}s")
+    tl.reset_zoom()
+
+    # Near the ends the window cannot be centred, but the playhead must still be in it.
+    for where in (20.0, 1795.0):
+        tl.reset_zoom()
+        tl.set_playhead(where)
+        tl.set_zoom(10.0)
+        inside = tl.view_start_s() <= where <= tl.view_start_s() + tl.view_span_s()
+        expect(inside, f"the playhead at {where:g}s stays inside the window",
+               f"{tl.view_start_s():.1f}..{tl.view_start_s() + tl.view_span_s():.1f}")
+
+    tl.reset_zoom()
+    tl.set_playhead(900.0)
     wheel(tl, 400.0, Qt.ControlModifier, +1)
     expect(tl.zoom() > 1.0, "ctrl+wheel zooms in", f"{tl.zoom():.2f}x")
-    expect(abs(tl._seconds_for(400.0) - mid) < 1.0,
-           "the moment under the pointer stays under the pointer",
-           f"{mid:.1f}s -> {tl._seconds_for(400.0):.1f}s")
+    centre = tl.view_start_s() + tl.view_span_s() / 2.0
+    expect(abs(centre - 900.0) < 0.05,
+           "the wheel uses the playhead too, not wherever the pointer happens to be",
+           f"centre {centre:.1f}s")
 
+    print("-- playback that leaves the window pulls it along --")
+    tl.set_zoom(20.0)
+    tl.set_playhead(1500.0)
+    expect(tl.view_start_s() <= 1500.0 <= tl.view_start_s() + tl.view_span_s(),
+           "a jump outside the window brings it back into view",
+           f"{tl.view_start_s():.1f}..{tl.view_start_s() + tl.view_span_s():.1f}")
+    before = tl.view_start_s()
+    tl.set_playhead(1500.0 + tl.view_span_s() * 0.1)
+    expect(tl.view_start_s() == before,
+           "but playing along inside it does not keep re-centring")
+    tl.reset_zoom()
+
+    tl.set_playhead(900.0)
+    tl.set_zoom(4.0)
     start = tl.view_start_s()
     wheel(tl, 400.0, Qt.AltModifier, -1)
     expect(tl.view_start_s() > start, "alt+wheel pans along the recording",

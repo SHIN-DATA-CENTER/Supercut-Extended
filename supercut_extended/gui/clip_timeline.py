@@ -129,12 +129,47 @@ class ClipTimelineWidget(QWidget):
     def set_playhead_seconds(self, seconds: float, visible: bool = True) -> None:
         self._play_s = max(0.0, seconds)
         self._show_play = visible
+        self._follow_playhead()
         self.update()
+
+    def _follow_playhead(self) -> None:
+        """Keep playback on screen once the track is wider than its viewport."""
+        area = self._scroller()
+        if area is None:
+            return
+        bar = area.horizontalScrollBar()
+        if bar.maximum() <= 0:
+            return
+        x = self._x_for_seconds(self._play_s)
+        left, right = bar.value() + HEADER_W, bar.value() + area.viewport().width()
+        if left <= x <= right:
+            return
+        self.centre_on_playhead()
 
     def set_zoom(self, zoom: float) -> None:
         self._zoom = max(0.2, min(zoom, 20.0))
         self._rescale()
         self.update()
+        # After _rescale the widget is a new width, but the scroll area only learns
+        # that on the next layout pass -- so the scroll position has to be set once
+        # the range has caught up, or it clamps against the old maximum.
+        QTimer.singleShot(0, self.centre_on_playhead)
+
+    def centre_on_playhead(self) -> None:
+        """Put the playhead in the middle of the visible track.
+
+        Zooming without this walks the playhead toward an edge and eventually off it,
+        which is the opposite of what zooming in to look at it is for.
+        """
+        area = self._scroller()
+        if area is None:
+            return
+        bar = area.horizontalScrollBar()
+        # The pinned header covers the left of the viewport, so the usable middle sits
+        # half a header to the right of the geometric one.
+        usable = area.viewport().width() - HEADER_W
+        target = self._x_for_seconds(self._play_s) - HEADER_W - usable / 2.0
+        bar.setValue(int(max(0, round(target))))
 
     def zoom(self) -> float:
         return self._zoom

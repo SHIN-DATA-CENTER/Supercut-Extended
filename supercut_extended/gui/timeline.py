@@ -89,6 +89,13 @@ class TimelineWidget(QWidget):
         if abs(seconds - self._playhead_s) < 0.02:
             return
         self._playhead_s = seconds
+        # While zoomed, playback would otherwise run straight out of the window and
+        # leave you watching an empty strip.
+        if self._zoom > 1.0:
+            span = self.view_span_s()
+            if not (self._view_start_s <= seconds <= self._view_start_s + span):
+                self._view_start_s = seconds - span / 2.0
+                self._clamp_view()
         self.update()
 
     def event_times(self) -> list[float]:
@@ -114,17 +121,18 @@ class TimelineWidget(QWidget):
         self.viewChanged.emit()
 
     def set_zoom(self, zoom: float, anchor_s: float | None = None) -> None:
-        """Zoom, keeping `anchor_s` under the same pixel it was already at.
+        """Zoom, putting `anchor_s` -- the playhead unless told otherwise -- in the
+        middle of the window.
 
-        Anchoring on the pointer is what makes wheel-zoom feel like a map rather than
-        a slider: without it the region you were looking at slides out from under you.
+        Centred rather than "keep it wherever it happened to be": the playhead is the
+        thing being looked at, and preserving its old fraction of the window leaves it
+        drifting toward an edge with every step until it falls off.
         """
-        old_span = self.view_span_s()
-        if anchor_s is None:
-            anchor_s = self._view_start_s + old_span / 2.0
-        frac = ((anchor_s - self._view_start_s) / old_span) if old_span > 0 else 0.5
         self._zoom = max(1.0, min(zoom, 400.0))
-        self._view_start_s = anchor_s - frac * self.view_span_s()
+        if anchor_s is None:
+            anchor_s = self._playhead_s
+        anchor_s = max(0.0, min(anchor_s, self._duration_s))
+        self._view_start_s = anchor_s - self.view_span_s() / 2.0
         self._clamp_view()
         self.update()
 
@@ -303,8 +311,9 @@ class TimelineWidget(QWidget):
         mods = event.modifiers()
         delta = event.angleDelta().y() or event.angleDelta().x()
         if mods & Qt.ControlModifier:
-            anchor = self._seconds_for(event.position().x())
-            self.set_zoom(self._zoom * (1.25 if delta > 0 else 0.8), anchor)
+            # Deliberately NOT the pointer: zoom is anchored on the playhead
+            # everywhere, so the wheel and the buttons agree about what stays put.
+            self.set_zoom(self._zoom * (1.25 if delta > 0 else 0.8))
             event.accept()
         elif mods & Qt.AltModifier:
             self.pan_seconds(-delta / 120.0 * self.view_span_s() * 0.15)
