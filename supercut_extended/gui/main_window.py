@@ -234,6 +234,7 @@ class MainWindow(QMainWindow):
         self._checked: set[str] = set()
         self._populating = False
         self._output_touched = False
+        self._loading_media = False
 
         self._build_ui()
         self._restore_settings()
@@ -418,8 +419,25 @@ class MainWindow(QMainWindow):
         self.subheader.setObjectName("h2")
         lay.addWidget(self.header)
         lay.addWidget(self.subheader)
+        lay.addWidget(self._build_media_row())
         lay.addWidget(self._build_preview(), 1)
         return outer
+
+    def _build_media_row(self) -> QWidget:
+        """Recording picker, hidden unless the match actually has more than one."""
+        self.media_combo = self._combo(fixed=False)
+        self.media_combo.currentIndexChanged.connect(self._on_media_combo)
+        caption_label = QLabel(tr("media.label"))
+        caption_label.setObjectName("fieldLabel")
+
+        self.media_row = QWidget()
+        row = QHBoxLayout(self.media_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(caption_label)
+        row.addWidget(self.media_combo, 1)
+        self.media_row.setVisible(False)
+        return self.media_row
 
     def _build_preview(self) -> QWidget:
         self.player = VideoPlayer()
@@ -1148,11 +1166,50 @@ class MainWindow(QMainWindow):
         if not (0 <= idx < len(rows)):
             return
         match = rows[idx]
-        media = match.playable_medias[0] if match.playable_medias else None
-        if media is None or media.path is None:
+        if not match.playable_medias:
+            return
+        self._match = match
+        self._fill_media_combo(match)
+        self._show_media(0)
+
+    def _fill_media_combo(self, match: Match) -> None:
+        """List this match's recordings, and only get in the way when there are several.
+
+        Highlight capture writes one file per highlight, so a match can be ten short
+        recordings. The preview can only show one at a time, and without a way to pick
+        there is no way to check the rest of what is about to be built.
+        """
+        medias = match.playable_medias
+        self._loading_media = True
+        try:
+            self.media_combo.clear()
+            for i, media in enumerate(medias, 1):
+                self.media_combo.addItem(
+                    tr("media.item", n=i, total=len(medias),
+                       length=fmt_duration(media.duration_s), events=len(media.events)))
+        finally:
+            self._loading_media = False
+        self.media_row.setVisible(len(medias) > 1)
+
+    def _on_media_combo(self, index: int) -> None:
+        if not self._loading_media and index >= 0:
+            self._show_media(index)
+
+    def _show_media(self, index: int) -> None:
+        match = self._match
+        medias = match.playable_medias if match else []
+        if not (0 <= index < len(medias)):
+            return
+        media = medias[index]
+        if media.path is None:
             return
 
-        self._match, self._media = match, media
+        self._media = media
+        self._loading_media = True
+        try:
+            self.media_combo.setCurrentIndex(index)
+        finally:
+            self._loading_media = False
         try:
             self._info = probe(media.path)
         except Exception as exc:
@@ -1161,9 +1218,11 @@ class MainWindow(QMainWindow):
             return
 
         self.header.setText(match.label())
+        total = len(match.playable_medias)
+        counter = f"    ({index + 1}/{total})" if total > 1 else ""
         self.subheader.setText(
             f"{media.path.name}    {self._info.width}x{self._info.height} "
-            f"{self._info.fps:.0f}fps    {fmt_duration(self._info.duration_s)}")
+            f"{self._info.fps:.0f}fps    {fmt_duration(self._info.duration_s)}{counter}")
 
         self.player.load(media.path)
         try:
@@ -1175,6 +1234,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(tr("status.load_fail", err=exc), 15000)
             raise
 
+    def _target_medias(self) -> list[tuple[Match, Media]]:
+        """Every recording Build will act on, in the order it will be joined.
+
+        A match is not always one file. Outplayed's Highlight capture mode writes a
+        separate recording per highlight, so a single VALORANT match here holds ten
+        of them -- and every code path used to take playable_medias[0], which is why
+        only the first one ever came out.
+        """
+        out: list[tuple[Match, Media]] = []
+        for match in self._target_matches():
+            for media in match.playable_medias:
+                if media.path is not None:
+                    out.append((match, media))
+        return out
+
     def _target_event_counts(self) -> dict[str, int]:
         """Events per kind across everything Build will act on, not just the preview.
 
@@ -1183,10 +1257,8 @@ class MainWindow(QMainWindow):
         actually about to be rendered.
         """
         counts: dict[str, int] = {}
-        for match in self._target_matches():
-            media = match.playable_medias[0] if match.playable_medias else None
-            source = media.event_counts() if media else match.event_counts()
-            for kind, n in source.items():
+        for _match, media in self._target_medias():
+            for kind, n in media.event_counts().items():
                 counts[kind] = counts.get(kind, 0) + n
         return counts
 
@@ -1247,8 +1319,7 @@ class MainWindow(QMainWindow):
         if self._output_touched:
             return
         targets = self._target_matches()
-        sources = [m.playable_medias[0].path for m in targets
-                   if m.playable_medias and m.playable_medias[0].path]
+        sources = [media.path for _m, media in self._target_medias()]
         if not sources:
             return
 
@@ -1360,10 +1431,7 @@ class MainWindow(QMainWindow):
             # keystroke. The worker probes properly before anything is encoded.
             n_events = n_segments = 0
             content = 0.0
-            for match in targets:
-                media = match.playable_medias[0] if match.playable_medias else None
-                if media is None:
-                    continue
+            for _match, media in self._target_medias():
                 segs = build_segments(
                     media.events, kinds=kinds,
                     pre_ms=None if use_defaults else self.pre_spin.value() * 1000,
@@ -1385,16 +1453,29 @@ class MainWindow(QMainWindow):
             self.edit_btn.setEnabled(bool(n_segments))
             return
 
-        content = total_duration_s(self._segments)
-        n_events = sum(1 for e in self._media.events if e.kind in kinds)
-        if self._segments:
+        # Totals span every recording of this match, not just the previewed one:
+        # a Highlight-mode match is several files, and the summary has to describe
+        # what Build will actually produce.
+        n_events = n_segments = 0
+        content = 0.0
+        for _match, media in self._target_medias():
+            segs = (self._segments if media is self._media else build_segments(
+                media.events, kinds=kinds,
+                pre_ms=None if use_defaults else self.pre_spin.value() * 1000,
+                post_ms=None if use_defaults else self.post_spin.value() * 1000,
+                duration_ms=media.duration_s * 1000 or None,
+                gap_ms=self.gap_spin.value() * 1000))
+            n_events += sum(1 for e in media.events if e.kind in kinds)
+            n_segments += len(segs)
+            content += total_duration_s(segs)
+        if n_segments:
             self.summary.setText(tr(
-                "summary", events=n_events, segments=len(self._segments),
+                "summary", events=n_events, segments=n_segments,
                 length=fmt_duration(content), eta=content / rate))
         else:
             self.summary.setText(tr("summary.none"))
-        self.build_btn.setEnabled(bool(self._segments) and self._thread is None)
-        self.edit_btn.setEnabled(bool(self._segments))
+        self.build_btn.setEnabled(bool(n_segments) and self._thread is None)
+        self.edit_btn.setEnabled(bool(n_segments))
 
     def _on_output_edited(self, _text: str) -> None:
         self._output_touched = True
@@ -1448,10 +1529,10 @@ class MainWindow(QMainWindow):
             return
 
         items: list[tuple[Path, list, str]] = []
-        for match in targets:
-            media = match.playable_medias[0] if match.playable_medias else None
-            if media is not None and media.path is not None:
-                items.append((media.path, list(media.events), match.label()))
+        for match, media in self._target_medias():
+            # One job per recording, not per match: a Highlight-mode match is several
+            # files and all of them belong in the montage.
+            items.append((media.path, list(media.events), match.label()))
         if not items:
             return
 
@@ -1521,12 +1602,9 @@ class MainWindow(QMainWindow):
         timeline = Timeline()
         limits: dict[Path, float] = {}
 
-        for match in self._target_matches():
-            media = match.playable_medias[0] if match.playable_medias else None
-            if media is None or media.path is None:
-                continue
-            # The previewed match has a real probe; the rest fall back to the library's
-            # own duration, which is close enough to clamp a trim against.
+        for match, media in self._target_medias():
+            # The previewed recording has a real probe; the rest fall back to the
+            # library's own duration, which is close enough to clamp a trim against.
             duration_ms = (self._info.duration_ms
                            if self._media is media and self._info
                            else media.duration_s * 1000.0)

@@ -127,14 +127,19 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
-def pick_media(match: Match, media_id: int | None) -> Media:
-    """The media a match should be cut from, honouring an explicit --media."""
-    medias = match.playable_medias
+def pick_medias(match: Match, media_id: int | None) -> list[Media]:
+    """Every recording a match should be cut from, or just the one --media names.
+
+    All of them by default. Outplayed's Highlight capture writes a separate file per
+    highlight, so a match is often several recordings -- taking only the first is why
+    a ten-clip VALORANT match used to produce one clip.
+    """
+    medias = [m for m in match.playable_medias if m.path is not None]
     if media_id is not None:
         medias = [m for m in medias if m.media_id == media_id]
     if not medias:
         raise SystemExit(f"no playable media with events for match {match.match_id}")
-    return medias[0]
+    return medias
 
 
 def resolve_matches(matches: list[Match], selectors: list[str]) -> list[Match]:
@@ -205,46 +210,49 @@ def cmd_build(args: argparse.Namespace) -> int:
     jobs: list[RenderJob] = []
     skipped: list[str] = []
     for match in selected:
-        media = pick_media(match, args.media)
-        if len(match.playable_medias) > 1 and len(selected) == 1:
-            print(f"note: match has {len(match.playable_medias)} medias, using "
-                  f"#{media.media_id} (--media to choose)")
-        try:
-            info = probe(media.path)
-        except ProbeError as exc:
-            raise SystemExit(str(exc))
+        medias = pick_medias(match, args.media)
+        if len(medias) > 1:
+            print(f"{match.label()}: {len(medias)} recordings "
+                  f"(--media to pick just one)")
+        for media in medias:
+            try:
+                info = probe(media.path)
+            except ProbeError as exc:
+                raise SystemExit(str(exc))
 
-        segments = build_segments(
-            media.events,
-            kinds=kinds,
-            pre_ms=args.pre * 1000 if args.pre is not None else None,
-            post_ms=args.post * 1000 if args.post is not None else None,
-            duration_ms=info.duration_ms,
-            gap_ms=args.gap * 1000,
-        )
-        if not segments:
+            segments = build_segments(
+                media.events,
+                kinds=kinds,
+                pre_ms=args.pre * 1000 if args.pre is not None else None,
+                post_ms=args.post * 1000 if args.post is not None else None,
+                duration_ms=info.duration_ms,
+                gap_ms=args.gap * 1000,
+            )
+            if not segments:
+                continue
+
+            n_events = sum(1 for e in media.events if not kinds or e.kind in kinds)
+            print(f"{match.label()}")
+            print(f"  source   {media.path.name}")
+            print(f"           {info.width}x{info.height} {info.fps:.0f}fps "
+                  f"{info.duration_s:.1f}s  {len(info.audio)} audio track(s)")
+            print(f"  events   {n_events} -> {len(segments)} segments, "
+                  f"{total_duration_s(segments):.1f}s of content")
+
+            if args.dry_run:
+                for i, seg in enumerate(segments, 1):
+                    print(f"    {i:>3}. {seg.start_s:9.3f}s -> "
+                          f"{seg.end_ms / 1000:9.3f}s ({seg.duration_s:6.2f}s)")
+
+            jobs.append(RenderJob(
+                source=media.path, segments=segments, label=match.label(),
+                output=(default_output_dir(media.path)
+                        / f"{media.path.stem}-supercut-{stamp}.mp4"),
+            ))
+
+        if not any(j.source in {m.path for m in medias} for j in jobs):
             skipped.append(f"{match.label()} (has: "
                            f"{', '.join(sorted(match.event_counts())) or 'none'})")
-            continue
-
-        n_events = sum(1 for e in media.events if not kinds or e.kind in kinds)
-        print(f"{match.label()}")
-        print(f"  source   {media.path.name}")
-        print(f"           {info.width}x{info.height} {info.fps:.0f}fps "
-              f"{info.duration_s:.1f}s  {len(info.audio)} audio track(s)")
-        print(f"  events   {n_events} -> {len(segments)} segments, "
-              f"{total_duration_s(segments):.1f}s of content")
-
-        if args.dry_run:
-            for i, s in enumerate(segments, 1):
-                print(f"    {i:>3}. {s.start_s:9.3f}s -> {s.end_ms / 1000:9.3f}s "
-                      f"({s.duration_s:6.2f}s)")
-
-        jobs.append(RenderJob(
-            source=media.path, segments=segments, label=match.label(),
-            output=(default_output_dir(media.path)
-                    / f"{media.path.stem}-supercut-{stamp}.mp4"),
-        ))
 
     for note in skipped:
         print(f"skipped: no events matched {kinds} in {note}")

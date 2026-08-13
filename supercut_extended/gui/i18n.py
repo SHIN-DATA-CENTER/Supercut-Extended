@@ -27,6 +27,8 @@ STRINGS: dict[str, dict[str, str]] = {
                    "チェックが無いときは、表示中の試合だけを出力します。",
 
         "select.match": "試合を選択してください",
+        "media.label": "録画",
+        "media.item": "{n}/{total}　{length}　{events} 件のイベント",
         "loading": "Outplayed のライブラリを読み込み中...",
         "loaded": "{n} 件の試合にハイライトがあります",
 
@@ -249,6 +251,8 @@ STRINGS: dict[str, dict[str, str]] = {
                    "With nothing ticked, only the match being previewed is built.",
 
         "select.match": "Select a match",
+        "media.label": "Recording",
+        "media.item": "{n}/{total}  {length}  {events} events",
         "loading": "Loading Outplayed library...",
         "loaded": "{n} matches with highlights",
 

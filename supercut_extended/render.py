@@ -227,6 +227,26 @@ def _framing_filters(opts: RenderOptions, info: MediaInfo) -> list[str]:
     return parts
 
 
+# Frame rates a capture is actually trying to run at. A measured average over a
+# short clip lands a hair off the nominal rate, and those hairs used to count as a
+# difference: a VALORANT match of ten highlight recordings measured 59.98, 59.99 and
+# 60.00 and was refused as "streams differ" even though every file is 60 fps.
+STANDARD_FPS = (23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0,
+                90.0, 100.0, 120.0, 144.0, 240.0)
+FPS_SNAP = 0.05          # tight enough to keep 59.94 and 60 apart
+
+
+def nominal_fps(fps: float) -> float:
+    """The rate a source is nominally at, so measurement noise is not a mismatch.
+
+    The NEAREST standard rate, not the first one in range: 59.98 sits 0.042 from
+    59.94 and 0.018 from 60, so scanning in order snapped it to 59.94 and split a
+    set of plain 60 fps recordings into two incompatible groups.
+    """
+    nearest = min(STANDARD_FPS, key=lambda standard: abs(fps - standard))
+    return nearest if abs(fps - nearest) <= FPS_SNAP else round(fps, 2)
+
+
 def _stream_shape(info: MediaInfo, opts: RenderOptions) -> tuple:
     """What stage 1 will emit for this source, as far as concat cares.
 
@@ -235,7 +255,7 @@ def _stream_shape(info: MediaInfo, opts: RenderOptions) -> tuple:
     inherits width/height/fps from whatever it was fed. A stream copy normalises
     nothing at all, so every property comes straight from the source.
     """
-    fps = round(opts.fps if opts.fps else info.fps, 2)
+    fps = nominal_fps(opts.fps if opts.fps else info.fps)
     if opts.mode == "copy":
         video: tuple = (info.video_codec, info.pix_fmt, info.width, info.height, fps)
     else:
@@ -366,6 +386,14 @@ def render_many(
 
     if len(jobs) > 1:
         _check_combinable(jobs, infos, options)
+        # Same nominal rate, different measured ones: each segment would otherwise be
+        # encoded at its own source's rate and the parts still would not line up.
+        # Pin the whole batch to the shared nominal rate.
+        rates = {nominal_fps(infos[Path(j.source)].fps) for j in jobs}
+        raw = {round(infos[Path(j.source)].fps, 3) for j in jobs}
+        if (options.mode != "copy" and options.fps is None
+                and len(rates) == 1 and len(raw) > 1):
+            options = replace(options, fps=rates.pop())
 
     # Flatten to (source, segment, fades) so the whole batch shares one worker pool and
     # one progress total, rather than stalling between files. Order is preserved, which
