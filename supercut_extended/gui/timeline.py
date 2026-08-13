@@ -13,14 +13,17 @@ a bare CLI cannot.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen,
 )
-from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QScrollBar,
+                               QSizePolicy, QToolTip, QWidget)
 
 from ..model import GameEvent, Segment
-from .i18n import event_label
+from . import icons
+from .i18n import event_label, tr
+from .style import TEXT_DIM
 
 EVENT_COLORS: dict[str, str] = {
     "kill": "#4ade80",
@@ -47,6 +50,7 @@ def event_color(kind: str) -> QColor:
 
 class TimelineWidget(QWidget):
     seekRequested = Signal(float)     # seconds
+    viewChanged = Signal()            # zoom or scroll position moved
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -107,6 +111,7 @@ class TimelineWidget(QWidget):
         span = self.view_span_s()
         self._view_start_s = max(0.0, min(self._view_start_s,
                                           max(0.0, self._duration_s - span)))
+        self.viewChanged.emit()
 
     def set_zoom(self, zoom: float, anchor_s: float | None = None) -> None:
         """Zoom, keeping `anchor_s` under the same pixel it was already at.
@@ -123,6 +128,11 @@ class TimelineWidget(QWidget):
         self._clamp_view()
         self.update()
 
+    def set_view_start(self, seconds: float) -> None:
+        self._view_start_s = seconds
+        self._clamp_view()
+        self.update()
+
     def pan_seconds(self, delta_s: float) -> None:
         self._view_start_s += delta_s
         self._clamp_view()
@@ -131,6 +141,7 @@ class TimelineWidget(QWidget):
     def reset_zoom(self) -> None:
         self._zoom = 1.0
         self._view_start_s = 0.0
+        self.viewChanged.emit()
         self.update()
 
     # -- geometry -----------------------------------------------------------
@@ -318,3 +329,92 @@ class TimelineWidget(QWidget):
         if event.button() == Qt.MiddleButton and self._pan_from is not None:
             self._pan_from = None
             self.setCursor(Qt.PointingHandCursor)
+
+
+class TimelineControls(QWidget):
+    """Scrollbar and zoom buttons for a TimelineWidget.
+
+    The wheel modifiers alone are not discoverable: someone who never reads the hint
+    line has no way to know the strip zooms at all. These give the same three actions
+    a visible home, and the scrollbar doubles as a map of where in the recording the
+    visible window sits.
+    """
+
+    STEPS = 100.0        # scrollbars are integral; work in centiseconds
+
+    def __init__(self, view: TimelineWidget, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._view = view
+        self._syncing = False
+
+        self.bar = QScrollBar(Qt.Horizontal)
+        self.bar.setFixedHeight(11)
+        self.bar.setSingleStep(int(self.STEPS))
+        self.bar.valueChanged.connect(self._on_scroll)
+
+        self.factor = QLabel("1.0x")
+        self.factor.setObjectName("captionLabel")
+        self.factor.setMinimumWidth(38)
+        self.factor.setAlignment(Qt.AlignCenter)
+
+        self.out_btn = self._button("Edit/Remove_Minus", tr("editor.zoom_out"))
+        self.out_btn.clicked.connect(lambda: self._zoom_by(0.8))
+        self.in_btn = self._button("Edit/Add_Plus", tr("editor.zoom_in"))
+        self.in_btn.clicked.connect(lambda: self._zoom_by(1.25))
+        self.fit_btn = QPushButton(tr("editor.fit"))
+        self.fit_btn.setFixedHeight(22)
+        # Enough room for the label at either language; without a floor the row
+        # squeezes it until the text is clipped.
+        self.fit_btn.setMinimumWidth(78)
+        self.fit_btn.setStyleSheet("padding: 0 8px;")
+        self.fit_btn.clicked.connect(view.reset_zoom)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self.bar, 1)
+        row.addWidget(self.out_btn)
+        row.addWidget(self.factor)
+        row.addWidget(self.in_btn)
+        row.addWidget(self.fit_btn)
+
+        view.viewChanged.connect(self.sync)
+        self.sync()
+
+    @staticmethod
+    def _button(icon_name: str, tip: str) -> QPushButton:
+        btn = QPushButton()
+        btn.setObjectName("transport")
+        btn.setIcon(icons.icon(icon_name, TEXT_DIM, 14))
+        btn.setIconSize(QSize(14, 14))
+        btn.setFixedSize(26, 22)
+        btn.setToolTip(tip)
+        return btn
+
+    def _zoom_by(self, factor: float) -> None:
+        self._view.set_zoom(self._view.zoom() * factor)
+
+    def _on_scroll(self, value: int) -> None:
+        if self._syncing:
+            return
+        self._view.set_view_start(value / self.STEPS)
+
+    def sync(self) -> None:
+        """Mirror the widget's window onto the scrollbar, without echoing back."""
+        view = self._view
+        duration = view._duration_s
+        span = view.view_span_s()
+        hidden = max(0.0, duration - span)
+        self._syncing = True
+        try:
+            self.bar.setRange(0, int(hidden * self.STEPS))
+            self.bar.setPageStep(max(1, int(span * self.STEPS)))
+            self.bar.setValue(int(view.view_start_s() * self.STEPS))
+        finally:
+            self._syncing = False
+        # Nothing to scroll at 1x; leave the bar in place but inert so the row does
+        # not change height as the zoom changes.
+        self.bar.setEnabled(hidden > 0.001)
+        self.factor.setText(f"{view.zoom():.1f}x")
+        self.out_btn.setEnabled(view.zoom() > 1.0)
+        self.fit_btn.setEnabled(view.zoom() > 1.0)

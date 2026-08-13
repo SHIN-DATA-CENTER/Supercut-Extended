@@ -154,6 +154,16 @@ QScrollArea {{ border: 0; background: transparent; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: #2b3446; border-radius: 5px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: #3a465d; }}
+/* Horizontal bars were never styled, so every one in the app -- the editing
+   timeline's and the preview timeline's -- fell back to the platform default and
+   drew as a pale hairline nobody could see, let alone grab. */
+QScrollBar:horizontal {{ background: {SURFACE}; height: 11px; margin: 0;
+    border-radius: 5px; }}
+QScrollBar::handle:horizontal {{ background: #2b3446; border-radius: 5px;
+    min-width: 34px; }}
+QScrollBar::handle:horizontal:hover {{ background: #3a465d; }}
+QScrollBar:horizontal:disabled {{ background: transparent; }}
+QScrollBar::handle:horizontal:disabled {{ background: #1b2130; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 

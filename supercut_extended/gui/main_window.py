@@ -45,7 +45,7 @@ from .i18n import event_label, fmt_duration, language, set_language, tr
 from .player import VideoPlayer
 from .style import (ACCENT_HI, TEXT, TEXT_DIM, TEXT_FAINT, build_style,
                     checkbox_style)
-from .timeline import TimelineWidget, event_color
+from .timeline import TimelineControls, TimelineWidget, event_color
 from .update_dialog import UpdateCheck, UpdateDialog
 
 
@@ -429,13 +429,14 @@ class MainWindow(QMainWindow):
 
         self.timeline = TimelineWidget()
         self.timeline.seekRequested.connect(self.player.seek)
+        self.timeline_controls = TimelineControls(self.timeline)
 
         self.legend = QLabel("")
         self.legend.setTextFormat(Qt.RichText)
         self.legend.setStyleSheet(f"color: {TEXT_DIM};")
 
-        return card(self.player, self.timeline, self.legend, spacing=8,
-                    margins=(12, 12, 12, 10))
+        return card(self.player, self.timeline, self.timeline_controls, self.legend,
+                    spacing=8, margins=(12, 12, 12, 10))
 
     def _build_settings(self) -> QWidget:
         """One card holding every setting, scrolled internally.

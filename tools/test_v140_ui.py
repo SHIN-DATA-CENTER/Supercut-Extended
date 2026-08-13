@@ -19,7 +19,8 @@ from supercut_extended import __version__                      # noqa: E402
 from supercut_extended.gui.about_dialog import AboutDialog     # noqa: E402
 from supercut_extended.gui.i18n import tr                      # noqa: E402
 from supercut_extended.gui.main_window import MainWindow       # noqa: E402
-from supercut_extended.gui.timeline import TimelineWidget      # noqa: E402
+from supercut_extended.gui.timeline import (                   # noqa: E402
+    TimelineControls, TimelineWidget)
 
 failures: list[str] = []
 
@@ -135,6 +136,44 @@ def check_timeline_zoom() -> None:
            "loading another match resets the view")
 
 
+def check_timeline_controls() -> None:
+    print("-- the scrollbar and zoom buttons --")
+    tl = TimelineWidget()
+    tl.resize(800, 90)
+    tl.set_data(1800.0, [], [])
+    controls = TimelineControls(tl)
+    controls.resize(800, 24)
+
+    expect(not controls.bar.isEnabled(),
+           "nothing to scroll while the whole recording is shown")
+    expect(not controls.out_btn.isEnabled(), "zoom out is dead at 1x")
+    expect(controls.factor.text() == "1.0x", "the factor is shown",
+           controls.factor.text())
+
+    controls.in_btn.click()
+    expect(tl.zoom() > 1.0, "the + button zooms in", f"{tl.zoom():.2f}x")
+    expect(controls.bar.isEnabled(), "and the scrollbar wakes up")
+    expect(controls.bar.maximum() > 0, "with a range to scroll through",
+           f"0..{controls.bar.maximum()}")
+
+    controls.bar.setValue(controls.bar.maximum())
+    expect(abs(tl.view_start_s() + tl.view_span_s() - 1800.0) < 0.05,
+           "dragging the bar to the end lands exactly on the end of the recording",
+           f"{tl.view_start_s() + tl.view_span_s():.2f}s")
+
+    # The wheel and the bar are two views of one position: moving the widget has to
+    # move the bar, or the bar snaps the view back the next time it is touched.
+    tl.set_view_start(0.0)
+    expect(controls.bar.value() == 0,
+           "panning the widget moves the scrollbar too", str(controls.bar.value()))
+
+    controls.out_btn.click()
+    expect(tl.zoom() < 2.0, "the - button zooms back out", f"{tl.zoom():.2f}x")
+    controls.fit_btn.click()
+    expect(tl.zoom() == 1.0 and not controls.bar.isEnabled(),
+           "fit returns to the whole recording and parks the bar")
+
+
 def check_about(win: MainWindow) -> None:
     print("-- the about box says who made it and what it bundles --")
     dlg = AboutDialog(win)
@@ -164,6 +203,7 @@ def main() -> int:
         try:
             check_tabs(win)
             check_timeline_zoom()
+            check_timeline_controls()
             check_about(win)
         finally:
             print("\n" + ("v1.4.0 UI OK" if not failures

@@ -187,7 +187,12 @@ def main() -> int:
     settle(600)
     shot = player.grab().toImage()
     frame = view.mapFromScene(view._scene.sceneRect()).boundingRect()
-    inside = view.mapTo(player, QPoint(frame.left() + 3, view.height() // 2))
+    # 5% into the frame, not 3px: cropping 240 off each side of 1920 leaves padding
+    # 12.5% of the frame wide, so this is comfortably inside it -- while +3px sat in
+    # the rounding error of mapFromScene and landed outside the frame about half the
+    # time, failing on timing rather than on behaviour.
+    inside = view.mapTo(player, QPoint(int(frame.left() + frame.width() * 0.05),
+                                       view.height() // 2))
     inside_edge = QImage.pixelColor(shot, inside.x(), inside.y())
     expect(inside_edge.red() < 40 and inside_edge.blue() < 60,
            "real output padding is drawn black inside the frame",
