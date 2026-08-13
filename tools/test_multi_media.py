@@ -97,18 +97,27 @@ def check_gui(win: MainWindow) -> None:
            "the event tally adds up over all recordings",
            f"{sum(counts.values())} vs {len(target.events)}")
 
-    print("-- the recording picker appears, and only when it is needed --")
-    expect(win.media_row.isVisible(), "the picker is shown for a multi-file match")
-    expect(win.media_combo.count() == len(target.playable_medias),
-           "one entry per recording", str(win.media_combo.count()))
+    print("-- the recordings are laid out on one timeline --")
+    recs = win.timeline.recordings()
+    expect(len(recs) == len(target.playable_medias),
+           "every recording is on the strip", str(len(recs)))
+    expect(recs[0].offset_s == 0.0, "the first starts the axis")
+    expect(all(b.offset_s >= a.end_s - 0.01 for a, b in zip(recs, recs[1:])),
+           "and they run end to end without overlapping")
+    total = sum(r.duration_s for r in recs)
+    expect(abs(win.timeline._duration_s - total) < 0.05,
+           "the axis is as long as all of them together",
+           f"{win.timeline._duration_s:.1f}s vs {total:.1f}s")
 
+    print("-- seeking across the axis switches recording --")
     before = win._media
-    win.media_combo.setCurrentIndex(1)
+    win._seek_axis(recs[1].offset_s + 1.0)
     QApplication.processEvents()
-    expect(win._media is not before, "picking another entry switches the preview")
-    expect(win._media is target.playable_medias[1], "to the recording it names")
-    win.media_combo.setCurrentIndex(0)
+    expect(win._media is not before, "crossing into the next block loads its file")
+    expect(win._media is target.playable_medias[1], "the one that block stands for")
+    win._seek_axis(0.5)
     QApplication.processEvents()
+    expect(win._media is target.playable_medias[0], "and back again")
 
     print("-- the editor timeline spans every recording --")
     for kind, box in win._kind_boxes.items():
@@ -128,8 +137,8 @@ def check_gui(win: MainWindow) -> None:
         if row >= 0:
             win.table.selectRow(row)
             QApplication.processEvents()
-            expect(not win.media_row.isVisible(),
-                   "the picker hides again for an ordinary one-file match")
+            expect(len(win.timeline.recordings()) == 1,
+                   "an ordinary one-file match is a single block")
 
 
 def main() -> int:

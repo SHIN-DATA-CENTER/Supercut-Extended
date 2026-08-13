@@ -59,6 +59,15 @@ def settle(ms: int) -> None:
     loop.exec()
 
 
+def at(shot: QImage, x: float, y: float):
+    """Sample a WIDGET coordinate: grab() images are in device pixels, so on a
+    scaled display they are larger than the widget and logical coordinates miss."""
+    ratio = shot.devicePixelRatio() or 1.0
+    px = min(shot.width() - 1, max(0, int(x * ratio)))
+    py = min(shot.height() - 1, max(0, int(y * ratio)))
+    return QImage.pixelColor(shot, px, py)
+
+
 def column_red(shot: QImage, frac: float) -> float:
     """Mean red level down a column at `frac` across the *frame* (not the widget)."""
     w, h = shot.width(), shot.height()
@@ -158,7 +167,7 @@ def main() -> int:
            "the video really does leave the widget unfilled",
            f"frame {frame.width()}px in a {view.width()}px widget")
     left = view.mapTo(player, QPoint(4, view.height() // 2))
-    outside = QImage.pixelColor(shot, left.x(), left.y())
+    outside = at(shot, left.x(), left.y())
     expect(outside.blue() > 100 and outside.red() < 90,
            "the leftover shows the parent background",
            f"rgb({outside.red()},{outside.green()},{outside.blue()})")
@@ -177,7 +186,7 @@ def main() -> int:
     expect(frame.left() > 6, "there is room beside the frame to spill into",
            f"frame starts at x={frame.left()} of {view.width()}")
     beside = view.mapTo(player, QPoint(max(0, frame.left() - 5), view.height() // 2))
-    spill = QImage.pixelColor(shot, beside.x(), beside.y())
+    spill = at(shot, beside.x(), beside.y())
     expect(spill.blue() > 100 and spill.red() < 90,
            "beside the frame is still the parent background",
            f"rgb({spill.red()},{spill.green()},{spill.blue()})")
@@ -196,7 +205,7 @@ def main() -> int:
     pad_point = QPointF(scene_rect.left() + scene_rect.width() * 0.05,
                         scene_rect.center().y())
     inside = view.mapTo(player, view.mapFromScene(pad_point))
-    inside_edge = QImage.pixelColor(shot, inside.x(), inside.y())
+    inside_edge = at(shot, inside.x(), inside.y())
     expect(inside_edge.red() < 40 and inside_edge.blue() < 60,
            "real output padding is drawn black inside the frame",
            f"rgb({inside_edge.red()},{inside_edge.green()},{inside_edge.blue()})")

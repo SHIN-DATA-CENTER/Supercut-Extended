@@ -13,6 +13,8 @@ a bare CLI cannot.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen,
@@ -48,6 +50,30 @@ def event_color(kind: str) -> QColor:
     return QColor(EVENT_COLORS.get(kind, DEFAULT_COLOR))
 
 
+@dataclass
+class Recording:
+    """One source file on the shared axis.
+
+    A match is not always one file -- Highlight capture writes one per highlight --
+    so the strip lays them end to end and the axis runs across the whole set. Times
+    inside `events` and `segments` stay relative to their own file; `offset_s` is
+    where that file starts on the shared axis.
+    """
+
+    label: str
+    duration_s: float
+    events: list[GameEvent] = field(default_factory=list)
+    segments: list[Segment] = field(default_factory=list)
+    offset_s: float = 0.0
+
+    @property
+    def end_s(self) -> float:
+        return self.offset_s + self.duration_s
+
+
+BLOCK_GAP_PX = 6         # visual break between recordings, never part of the axis
+
+
 class TimelineWidget(QWidget):
     seekRequested = Signal(float)     # seconds
     viewChanged = Signal()            # zoom or scroll position moved
@@ -65,6 +91,7 @@ class TimelineWidget(QWidget):
         self._zoom = 1.0
         self._view_start_s = 0.0
         self._pan_from: tuple[float, float] | None = None
+        self._recordings: list[Recording] = []
         self.setMinimumHeight(int(SEG_H + EV_H + RULER_H + PAD * 2 + 6))
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -73,10 +100,24 @@ class TimelineWidget(QWidget):
     # -- data ---------------------------------------------------------------
     def set_data(self, duration_s: float, events: list[GameEvent],
                  segments: list[Segment]) -> None:
-        first = abs(self._duration_s - max(0.0, duration_s)) > 0.01
-        self._duration_s = max(0.0, duration_s)
-        self._events = list(events)
-        self._segments = list(segments)
+        """Single-recording form, kept for callers that only ever have one file."""
+        self.set_recordings([Recording("", max(0.0, duration_s), list(events),
+                                       list(segments))])
+
+    def set_recordings(self, recordings: list[Recording]) -> None:
+        """Lay several source files end to end on one axis."""
+        offset = 0.0
+        laid: list[Recording] = []
+        for rec in recordings:
+            laid.append(Recording(rec.label, max(0.0, rec.duration_s), rec.events,
+                                  rec.segments, offset))
+            offset += max(0.0, rec.duration_s)
+
+        first = abs(self._duration_s - offset) > 0.01
+        self._recordings = laid
+        self._duration_s = offset
+        self._events = [e for r in laid for e in r.events]
+        self._segments = [s for r in laid for s in r.segments]
         if first:
             # A different recording: start from the whole thing rather than keeping a
             # window that pointed into the previous one.
@@ -99,7 +140,38 @@ class TimelineWidget(QWidget):
         self.update()
 
     def event_times(self) -> list[float]:
-        return sorted(e.time_ms / 1000.0 for e in self._events)
+        """Every event on the shared axis, so jumping works across recordings."""
+        return sorted(t for t, _e in self.global_events())
+
+    def global_events(self) -> list[tuple[float, GameEvent]]:
+        """(axis seconds, event). Event times are stored relative to their own file."""
+        return [(rec.offset_s + e.time_ms / 1000.0, e)
+                for rec in self._recordings for e in rec.events]
+
+    def global_segments(self) -> list[tuple[float, float]]:
+        return [(rec.offset_s + seg.start_s, rec.offset_s + seg.end_ms / 1000.0)
+                for rec in self._recordings for seg in rec.segments]
+
+    def locate(self, axis_s: float) -> tuple[int, float]:
+        """Axis seconds -> (recording index, seconds into that recording)."""
+        for i, rec in enumerate(self._recordings):
+            if axis_s < rec.end_s or i == len(self._recordings) - 1:
+                return i, max(0.0, min(axis_s - rec.offset_s, rec.duration_s))
+        return -1, 0.0
+
+    def recordings(self) -> list[Recording]:
+        return list(self._recordings)
+
+    def _blocks_in_view(self) -> list[Recording]:
+        """Only the recordings the current window actually touches.
+
+        At high zoom a match of ten files is mostly off screen, and drawing all of
+        them is wasted work on every repaint -- and every mouse move repaints.
+        """
+        start = self._view_start_s
+        end = start + self.view_span_s()
+        return [rec for rec in self._recordings
+                if rec.end_s >= start and rec.offset_s <= end]
 
     # -- zoom ---------------------------------------------------------------
     def zoom(self) -> float:
@@ -183,14 +255,17 @@ class TimelineWidget(QWidget):
 
         p.fillRect(self.rect(), QColor("#0d1017"))
 
-        # --- segment lane
-        base = QPainterPath()
-        base.addRoundedRect(QRectF(r.left(), seg_top, r.width(), SEG_H), 5, 5)
-        p.fillPath(base, QColor("#191e2b"))
+        # --- lanes, one block per recording so the file boundaries are visible
+        for rec in self._blocks_in_view():
+            x0 = self._x_for(rec.offset_s)
+            x1 = max(x0 + 2.0, self._x_for(rec.end_s) - BLOCK_GAP_PX)
+            block = QPainterPath()
+            block.addRoundedRect(QRectF(x0, seg_top, x1 - x0, SEG_H), 5, 5)
+            p.fillPath(block, QColor("#191e2b"))
 
-        for seg in self._segments:
-            x0 = self._x_for(seg.start_s)
-            x1 = self._x_for(seg.end_ms / 1000.0)
+        for start_s, end_s in self.global_segments():
+            x0 = self._x_for(start_s)
+            x1 = self._x_for(end_s)
             rect = QRectF(x0, seg_top, max(2.0, x1 - x0), SEG_H)
             grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
             grad.setColorAt(0.0, QColor("#60a5fa"))
@@ -199,13 +274,20 @@ class TimelineWidget(QWidget):
             bar.addRoundedRect(rect, 4, 4)
             p.fillPath(bar, grad)
 
-        # --- event lane
-        lane = QPainterPath()
-        lane.addRoundedRect(QRectF(r.left(), ev_top, r.width(), EV_H), 5, 5)
-        p.fillPath(lane, QColor("#141824"))
+        for rec in self._blocks_in_view():
+            x0 = self._x_for(rec.offset_s)
+            x1 = max(x0 + 2.0, self._x_for(rec.end_s) - BLOCK_GAP_PX)
+            lane = QPainterPath()
+            lane.addRoundedRect(QRectF(x0, ev_top, x1 - x0, EV_H), 5, 5)
+            p.fillPath(lane, QColor("#141824"))
+            if len(self._recordings) > 1 and x1 - x0 > 46:
+                p.setPen(QColor("#55617a"))
+                p.drawText(QRectF(x0 + 5, seg_top - 1, x1 - x0 - 8, SEG_H),
+                           Qt.AlignVCenter | Qt.AlignLeft, rec.label)
+                p.setPen(Qt.NoPen)
 
-        for ev in self._events:
-            x = self._x_for(ev.time_ms / 1000.0)
+        for axis_s, ev in self.global_events():
+            x = self._x_for(axis_s)
             c = event_color(ev.kind)
             p.setPen(QPen(c, 2.0))
             p.drawLine(QPointF(x, ev_top + 5), QPointF(x, ev_top + EV_H - 5))
@@ -286,13 +368,13 @@ class TimelineWidget(QWidget):
         if event.buttons() & Qt.LeftButton:
             self.seekRequested.emit(secs)
 
-        tolerance = max(self._duration_s * 0.004, 0.5)
-        near = [e for e in self._events
-                if abs(e.time_ms / 1000.0 - secs) < tolerance]
+        # Scale the grab radius to what is on screen, not to the whole recording:
+        # zoomed in, a fixed fraction of the total would cover the entire window.
+        tolerance = max(self.view_span_s() * 0.006, 0.15)
+        near = [(t, e) for t, e in self.global_events() if abs(t - secs) < tolerance]
         if near:
             lines = []
-            for e in near[:6]:
-                t = e.time_ms / 1000.0
+            for t, e in near[:6]:
                 lines.append(f"{event_label(e.kind)}  {int(t) // 60}:{t % 60:05.2f}")
             QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines), self)
         else:

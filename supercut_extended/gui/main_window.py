@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, Signal
+from PySide6.QtCore import (QObject, QSettings, QSize, Qt, QThread, QTimer,
+                            Signal)
 from PySide6.QtGui import QAction, QActionGroup, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
@@ -45,7 +46,8 @@ from .i18n import event_label, fmt_duration, language, set_language, tr
 from .player import VideoPlayer
 from .style import (ACCENT_HI, TEXT, TEXT_DIM, TEXT_FAINT, build_style,
                     checkbox_style)
-from .timeline import TimelineControls, TimelineWidget, event_color
+from .timeline import (Recording, TimelineControls, TimelineWidget,
+                       event_color)
 from .update_dialog import UpdateCheck, UpdateDialog
 
 
@@ -234,7 +236,7 @@ class MainWindow(QMainWindow):
         self._checked: set[str] = set()
         self._populating = False
         self._output_touched = False
-        self._loading_media = False
+        self._media_index = 0
 
         self._build_ui()
         self._restore_settings()
@@ -419,25 +421,9 @@ class MainWindow(QMainWindow):
         self.subheader.setObjectName("h2")
         lay.addWidget(self.header)
         lay.addWidget(self.subheader)
-        lay.addWidget(self._build_media_row())
         lay.addWidget(self._build_preview(), 1)
         return outer
 
-    def _build_media_row(self) -> QWidget:
-        """Recording picker, hidden unless the match actually has more than one."""
-        self.media_combo = self._combo(fixed=False)
-        self.media_combo.currentIndexChanged.connect(self._on_media_combo)
-        caption_label = QLabel(tr("media.label"))
-        caption_label.setObjectName("fieldLabel")
-
-        self.media_row = QWidget()
-        row = QHBoxLayout(self.media_row)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        row.addWidget(caption_label)
-        row.addWidget(self.media_combo, 1)
-        self.media_row.setVisible(False)
-        return self.media_row
 
     def _build_preview(self) -> QWidget:
         self.player = VideoPlayer()
@@ -446,7 +432,7 @@ class MainWindow(QMainWindow):
         self.player.next_btn.clicked.connect(lambda: self._jump_event(+1))
 
         self.timeline = TimelineWidget()
-        self.timeline.seekRequested.connect(self.player.seek)
+        self.timeline.seekRequested.connect(self._seek_axis)
         self.timeline_controls = TimelineControls(self.timeline)
 
         self.legend = QLabel("")
@@ -1169,33 +1155,17 @@ class MainWindow(QMainWindow):
         if not match.playable_medias:
             return
         self._match = match
-        self._fill_media_combo(match)
         self._show_media(0)
 
-    def _fill_media_combo(self, match: Match) -> None:
-        """List this match's recordings, and only get in the way when there are several.
+    def _resume_at(self, seconds: float, play: bool) -> None:
+        self.player.seek(seconds)
+        if play:
+            self.player.player.play()
 
-        Highlight capture writes one file per highlight, so a match can be ten short
-        recordings. The preview can only show one at a time, and without a way to pick
-        there is no way to check the rest of what is about to be built.
-        """
-        medias = match.playable_medias
-        self._loading_media = True
-        try:
-            self.media_combo.clear()
-            for i, media in enumerate(medias, 1):
-                self.media_combo.addItem(
-                    tr("media.item", n=i, total=len(medias),
-                       length=fmt_duration(media.duration_s), events=len(media.events)))
-        finally:
-            self._loading_media = False
-        self.media_row.setVisible(len(medias) > 1)
 
-    def _on_media_combo(self, index: int) -> None:
-        if not self._loading_media and index >= 0:
-            self._show_media(index)
 
-    def _show_media(self, index: int) -> None:
+    def _show_media(self, index: int, seek_s: float | None = None,
+                    play: bool = False) -> None:
         match = self._match
         medias = match.playable_medias if match else []
         if not (0 <= index < len(medias)):
@@ -1204,12 +1174,9 @@ class MainWindow(QMainWindow):
         if media.path is None:
             return
 
+        same = media is self._media
         self._media = media
-        self._loading_media = True
-        try:
-            self.media_combo.setCurrentIndex(index)
-        finally:
-            self._loading_media = False
+        self._media_index = index
         try:
             self._info = probe(media.path)
         except Exception as exc:
@@ -1224,7 +1191,13 @@ class MainWindow(QMainWindow):
             f"{media.path.name}    {self._info.width}x{self._info.height} "
             f"{self._info.fps:.0f}fps    {fmt_duration(self._info.duration_s)}{counter}")
 
-        self.player.load(media.path)
+        if not same:
+            self.player.load(media.path)
+        if seek_s is not None:
+            # After load() the media is not ready yet; queue the seek so it lands on
+            # the frame asked for rather than on nothing.
+            QTimer.singleShot(0 if same else 260,
+                              lambda t=seek_s: self._resume_at(t, play))
         try:
             self._rebuild_kind_boxes()
             self._rebuild_audio(self._info)
@@ -1335,18 +1308,53 @@ class MainWindow(QMainWindow):
 
     # -- playback -----------------------------------------------------------
     def _on_player_position(self, seconds: float) -> None:
-        self.timeline.set_playhead(seconds)
+        """Player time is inside one file; the strip runs across all of them.
+
+        Playing past the end of a recording moves on to the next, so a match made of
+        ten highlight files plays through as one piece.
+        """
+        recs = self.timeline.recordings()
+        i = self._media_index
+        if not (0 <= i < len(recs)):
+            self.timeline.set_playhead(seconds)
+            return
+        self.timeline.set_playhead(recs[i].offset_s + seconds)
+        if seconds >= recs[i].duration_s - 0.05 and i + 1 < len(recs):
+            self._show_media(i + 1, seek_s=0.0, play=True)
+
+    def _seek_axis(self, axis_s: float) -> None:
+        """Seek by shared-axis seconds, switching recordings when it crosses one."""
+        index, local = self.timeline.locate(axis_s)
+        if index < 0:
+            return
+        if index != self._media_index:
+            self._show_media(index, seek_s=local)
+        else:
+            self.player.seek(local)
 
     def _jump_event(self, direction: int) -> None:
+        """Step to the next/previous event, across recordings.
+
+        Both the event times and the seek are in shared-axis seconds, so skipping
+        forward off the end of one recording lands in the next one rather than
+        clamping at its last frame.
+        """
         times = self.timeline.event_times()
         if not times:
             return
-        now = self.player.position_s()
+        now = self._axis_position()
         if direction > 0:
             nxt = next((t for t in times if t > now + 0.25), times[-1])
         else:
             nxt = next((t for t in reversed(times) if t < now - 0.75), times[0])
-        self.player.seek(nxt)
+        self._seek_axis(nxt)
+
+    def _axis_position(self) -> float:
+        """Where playback is on the shared axis."""
+        recs = self.timeline.recordings()
+        i = self._media_index
+        offset = recs[i].offset_s if 0 <= i < len(recs) else 0.0
+        return offset + self.player.position_s()
 
     # -- settings changes ---------------------------------------------------
     def _on_use_defaults(self, checked: bool) -> None:
@@ -1408,8 +1416,27 @@ class MainWindow(QMainWindow):
             duration_ms=self._info.duration_ms,
             gap_ms=self.gap_spin.value() * 1000,
         )
-        shown = [e for e in self._media.events if not kinds or e.kind in kinds]
-        self.timeline.set_data(self._info.duration_s, shown, self._segments)
+        # The strip shows every recording of this match end to end, so the montage
+        # can be read as one piece instead of one file at a time.
+        recordings = []
+        for media in (self._match.playable_medias if self._match else []):
+            if media.path is None:
+                continue
+            previewed = media is self._media
+            duration = (self._info.duration_s if previewed and self._info
+                        else media.duration_s)
+            segs = self._segments if previewed else build_segments(
+                media.events, kinds=kinds,
+                pre_ms=None if use_defaults else self.pre_spin.value() * 1000,
+                post_ms=None if use_defaults else self.post_spin.value() * 1000,
+                duration_ms=media.duration_s * 1000 or None,
+                gap_ms=self.gap_spin.value() * 1000)
+            recordings.append(Recording(
+                label=f"{len(recordings) + 1}",
+                duration_s=duration,
+                events=[e for e in media.events if not kinds or e.kind in kinds],
+                segments=segs))
+        self.timeline.set_recordings(recordings)
 
         # Rough realtime multiplier for the ETA, from encoder.estimate_rate() so the
         # preset, the quality and the output frame size all move it (see the measured

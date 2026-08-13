@@ -41,7 +41,17 @@ def shoot(track: ClipTimelineWidget) -> QImage:
 
 
 def colour(img: QImage, x: float, y: float) -> tuple[int, int, int]:
-    c = QImage.pixelColor(img, int(x), int(y))
+    """Sample at a WIDGET coordinate, not an image one.
+
+    grab() returns a device-pixel image, so on a 150% display it is 1.5x the widget's
+    logical size. Reading logical coordinates straight out of it lands somewhere else
+    entirely -- which is exactly how this test started reporting the header and a clip
+    as the same colour.
+    """
+    ratio = img.devicePixelRatio() or 1.0
+    px = min(img.width() - 1, max(0, int(x * ratio)))
+    py = min(img.height() - 1, max(0, int(y * ratio)))
+    c = QImage.pixelColor(img, px, py)
     return c.red(), c.green(), c.blue()
 
 
