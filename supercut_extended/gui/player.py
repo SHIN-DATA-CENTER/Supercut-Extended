@@ -325,6 +325,8 @@ class VideoPlayer(QWidget):
         #   seek_map(position)       -> caller handles the seek
         self.time_map = None
         self.seek_map = None
+        self._pending_seek = 0.0
+        self._pending_play = False
 
         self.video = FramedVideoView()
         self.video.setMinimumHeight(300)
@@ -429,15 +431,23 @@ class VideoPlayer(QWidget):
         note = tr("frame.stretched") if (framing.stretch and framing.resizes) else ""
         self.frame_label.setText(f"{w}x{h}{note}")
 
-    def load(self, path: Path) -> None:
-        """Load a file and show its first frame instead of a black rectangle.
+    def load(self, path: Path, start_s: float = 0.0, play: bool = False) -> None:
+        """Load a file, land on `start_s`, and optionally keep playing.
 
         QMediaPlayer decodes nothing until playback starts, so selecting a match
         would otherwise leave an empty box. Nudging play->pause with the audio
         muted produces a poster frame without an audible blip.
+
+        The start position has to be carried through rather than seeked afterwards:
+        a seek issued before the media reports itself loaded is discarded, so
+        `load(); seek(x)` silently left playback sitting at 0. That is why moving to
+        a clip cut from a different recording used to restart the source from the
+        beginning -- and stop.
         """
         self.stop()
         self._prime = True
+        self._pending_seek = max(0.0, start_s)
+        self._pending_play = play
         self.player.setSource(QUrl.fromLocalFile(str(path)))
 
     def _on_media_status(self, status) -> None:
@@ -449,8 +459,9 @@ class VideoPlayer(QWidget):
         self.player.play()
 
         def settle() -> None:
-            self.player.pause()
-            self.player.setPosition(0)
+            self.player.setPosition(int(self._pending_seek * 1000))
+            if not self._pending_play:
+                self.player.pause()
             self.audio_out.setMuted(False)
             self.audio_out.setVolume(volume)
 

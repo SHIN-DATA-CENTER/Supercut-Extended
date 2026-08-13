@@ -17,6 +17,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QListWidget, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSlider,
@@ -520,15 +521,20 @@ class EditorWindow(QDialog):
         clip = clips[index]
         self._preview_index = index
         source = Path(clip.source)
+        target = clip.start_s if seek_s is None else seek_s
         if source != self._loaded_source:
-            self.player.load(source)
+            # The start position goes through load(): a seek issued before the media
+            # reports itself loaded is thrown away, which is why moving to a clip from
+            # a different recording used to restart that recording from 0 and stop.
+            self.player.load(source, start_s=target, play=play)
             self._loaded_source = source
-        self.player.seek(clip.start_s if seek_s is None else seek_s)
+        else:
+            self.player.seek(target)
+            if play:
+                self.player.player.play()
         self.track.set_playhead_seconds(
             self._timeline.start_of(index)
             + (0.0 if seek_s is None else max(0.0, seek_s - clip.start_s)))
-        if play:
-            self.player.toggle()
 
     def _on_scrub(self, seconds: float) -> None:
         """Jump anywhere in the montage by dragging the ruler.
@@ -595,9 +601,13 @@ class EditorWindow(QDialog):
 
         if ms < clip.source_end_ms:
             return
+        playing = self.player.player.playbackState() == QMediaPlayer.PlayingState
         for j in range(i + 1, len(clips)):
             if clips[j].enabled and clips[j].duration_ms > 0:
-                self._cue(j)
+                # Carry the playing state across: crossing into a clip from another
+                # recording reloads the player, and without this the sequence stopped
+                # dead at every file boundary.
+                self._cue(j, play=playing)
                 return
         # Pause, never stop: stop() drops the source, which blanks the monitor and
         # leaves _loaded_source pointing at a file the player no longer has -- so

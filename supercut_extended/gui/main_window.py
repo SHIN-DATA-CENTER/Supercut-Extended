@@ -1191,13 +1191,13 @@ class MainWindow(QMainWindow):
             f"{media.path.name}    {self._info.width}x{self._info.height} "
             f"{self._info.fps:.0f}fps    {fmt_duration(self._info.duration_s)}{counter}")
 
-        if not same:
-            self.player.load(media.path)
-        if seek_s is not None:
-            # After load() the media is not ready yet; queue the seek so it lands on
-            # the frame asked for rather than on nothing.
-            QTimer.singleShot(0 if same else 260,
-                              lambda t=seek_s: self._resume_at(t, play))
+        if same:
+            if seek_s is not None:
+                self._resume_at(seek_s, play)
+        else:
+            # The start position rides along with load(): a seek issued before the
+            # media reports itself loaded is discarded.
+            self.player.load(media.path, start_s=seek_s or 0.0, play=play)
         try:
             self._rebuild_kind_boxes()
             self._rebuild_audio(self._info)
