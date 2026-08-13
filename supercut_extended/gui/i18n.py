@@ -52,6 +52,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "timing.after": "後",
         "timing.gap": "結合間隔",
         "timing.hint": "未指定のときは、イベントの種類ごとに Outplayed が持っている前後の秒数をそのまま使います。",
+        "timing.negative": "「後」はマイナスにできます。イベントより手前で終わるので、キル後の余韻を切り落とせます（例: 前 8.0 / 後 -2.0 → 6 秒のクリップ）。",
+        "timing.empty": "「前」と「後」の合計が 0 以下です。終わりが始まりより前になるため、クリップが 1 つも作られません。",
 
         "out.method": "方式",
         "out.mode.encode": "再エンコード",
@@ -276,6 +278,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "timing.after": "after",
         "timing.gap": "merge gap",
         "timing.hint": "Left alone, each event keeps the before/after seconds Outplayed itself uses for that event kind.",
+        "timing.negative": "\"After\" can go negative, ending the clip before the event "
+                            "-- useful for cutting the tail off (e.g. 8.0 before / -2.0 after gives a 6 second clip).",
+        "timing.empty": "\"Before\" plus \"after\" is zero or less, so the end lands before the start and no clips are produced.",
 
         "out.method": "Method",
         "out.mode.encode": "Re-encode",

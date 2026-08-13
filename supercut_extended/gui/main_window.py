@@ -462,9 +462,13 @@ class MainWindow(QMainWindow):
         self.use_defaults.setChecked(True)
         self.use_defaults.toggled.connect(self._on_use_defaults)
 
-        self.pre_spin = self._spin(0.0, 60.0, 8.0)
-        self.post_spin = self._spin(0.0, 60.0, 2.0)
+        self.pre_spin = self._spin(0.0, 60.0, 8.0, step=0.1)
+        # "after" goes negative so the clip can END before the event -- trimming the
+        # tail off a kill instead of only ever extending it.
+        self.post_spin = self._spin(-60.0, 60.0, 2.0, step=0.1)
         self.gap_spin = self._spin(0.0, 30.0, 0.0)
+        for spin in (self.pre_spin, self.post_spin):
+            spin.valueChanged.connect(self._refresh_timing_warning)
 
         # The settings column is narrow, so labels sit above their controls and the
         # three spin boxes share one row rather than trailing off the right edge.
@@ -481,7 +485,11 @@ class MainWindow(QMainWindow):
             cell.addWidget(spin)
             trow.addLayout(cell)
         trow.addStretch(1)
-        timing_tab = [block(self.use_defaults, trow, caption(tr("timing.hint")))]
+        self.timing_warn = caption(tr("timing.empty"))
+        self.timing_warn.setStyleSheet("color: #fbbf24;")
+        self.timing_warn.setVisible(False)
+        timing_tab = [block(self.use_defaults, trow, caption(tr("timing.hint")),
+                            caption(tr("timing.negative")), self.timing_warn)]
 
         # --- output
         self.mode_encode = QRadioButton(tr("out.mode.encode"))
@@ -795,9 +803,10 @@ class MainWindow(QMainWindow):
         return box
 
     @staticmethod
-    def _spin(lo: float, hi: float, val: float) -> QDoubleSpinBox:
+    def _spin(lo: float, hi: float, val: float,
+              step: float = 0.5) -> QDoubleSpinBox:
         s = NoScrollDoubleSpinBox(suffix=" s", minimum=lo, maximum=hi,
-                                  singleStep=0.5)
+                                  singleStep=step)
         s.setValue(val)
         s.setMinimumWidth(96)
         return s
@@ -1360,7 +1369,19 @@ class MainWindow(QMainWindow):
     def _on_use_defaults(self, checked: bool) -> None:
         self.pre_spin.setEnabled(not checked)
         self.post_spin.setEnabled(not checked)
+        self._refresh_timing_warning()
         self._recompute()
+
+    def _refresh_timing_warning(self) -> None:
+        """Warn when the window has collapsed, instead of silently producing nothing.
+
+        With a negative "after" it is easy to ask for an end that is before the start.
+        build_segments drops such windows, so the only symptom would be a montage with
+        no clips in it and no explanation.
+        """
+        span = self.pre_spin.value() + self.post_spin.value()
+        self.timing_warn.setVisible(
+            not self.use_defaults.isChecked() and span <= 0)
 
     def _on_mode_changed(self) -> None:
         self._apply_output_control_states()

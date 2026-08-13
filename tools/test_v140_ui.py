@@ -19,6 +19,8 @@ from supercut_extended import __version__                      # noqa: E402
 from supercut_extended.gui.about_dialog import AboutDialog     # noqa: E402
 from supercut_extended.gui.i18n import tr                      # noqa: E402
 from supercut_extended.gui.main_window import MainWindow       # noqa: E402
+from supercut_extended.model import GameEvent                  # noqa: E402
+from supercut_extended.segments import build_segments          # noqa: E402
 from supercut_extended.gui.timeline import (                   # noqa: E402
     TimelineControls, TimelineWidget)
 
@@ -89,6 +91,59 @@ def check_tabs(win: MainWindow) -> None:
     QApplication.processEvents()
     expect(not win.custom_row.isVisible(),
            "picking a preset hides it again")
+
+
+def check_timing(win: MainWindow) -> None:
+    print("-- the clip timing spins --")
+    win.tabs.setCurrentIndex(1)
+    win.use_defaults.setChecked(False)
+    QApplication.processEvents()
+
+    expect(abs(win.pre_spin.singleStep() - 0.1) < 1e-6,
+           "before steps in 0.1s", str(win.pre_spin.singleStep()))
+    expect(abs(win.post_spin.singleStep() - 0.1) < 1e-6,
+           "after steps in 0.1s", str(win.post_spin.singleStep()))
+    win.post_spin.setValue(2.0)
+    win.post_spin.stepBy(-1)
+    expect(abs(win.post_spin.value() - 1.9) < 1e-6,
+           "one step really moves it a tenth", str(win.post_spin.value()))
+
+    print("-- after can go negative, to trim the tail --")
+    expect(win.post_spin.minimum() < 0, "the spin accepts negative values",
+           str(win.post_spin.minimum()))
+    win.pre_spin.setValue(8.0)
+    win.post_spin.setValue(-2.0)
+    QApplication.processEvents()
+    expect(win.post_spin.value() == -2.0, "and keeps the value it was given",
+           str(win.post_spin.value()))
+
+    # The window really has to end before the event, not merely be shorter.
+    ev = GameEvent("kill", 30_000, 15_000, 5_000)
+    segs = build_segments([ev], kinds=["kill"], pre_ms=8_000, post_ms=-2_000,
+                          duration_ms=60_000)
+    expect(len(segs) == 1, "a negative tail still produces a segment")
+    if segs:
+        expect(abs(segs[0].end_ms / 1000.0 - 28.0) < 0.01,
+               "which ends 2s BEFORE the event at 30s",
+               f"{segs[0].end_ms / 1000.0:.2f}s")
+        expect(abs(segs[0].duration_s - 6.0) < 0.01, "and is 6s long",
+               f"{segs[0].duration_s:.2f}s")
+
+    print("-- an impossible window is called out rather than silently empty --")
+    win.pre_spin.setValue(2.0)
+    win.post_spin.setValue(-3.0)
+    QApplication.processEvents()
+    expect(win.timing_warn.isVisible(),
+           "before+after <= 0 warns instead of just producing nothing")
+    empty = build_segments([ev], kinds=["kill"], pre_ms=2_000, post_ms=-3_000,
+                           duration_ms=60_000)
+    expect(not empty, "and that combination really does produce nothing")
+    win.pre_spin.setValue(8.0)
+    win.post_spin.setValue(2.0)
+    QApplication.processEvents()
+    expect(not win.timing_warn.isVisible(), "the warning clears again")
+    win.use_defaults.setChecked(True)
+    QApplication.processEvents()
 
 
 def check_timeline_zoom() -> None:
@@ -237,6 +292,7 @@ def main() -> int:
             return
         try:
             check_tabs(win)
+            check_timing(win)
             check_timeline_zoom()
             check_timeline_controls()
             check_about(win)
