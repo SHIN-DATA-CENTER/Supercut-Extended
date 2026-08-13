@@ -77,6 +77,12 @@ class AboutDialog(QDialog):
         notice.setTextFormat(Qt.RichText)
         notice.setOpenExternalLinks(True)
 
+        icons_notice = QLabel(tr("about.icons"))
+        icons_notice.setWordWrap(True)
+        icons_notice.setObjectName("captionLabel")
+        icons_notice.setTextFormat(Qt.RichText)
+        icons_notice.setOpenExternalLinks(True)
+
         copyright_ = QLabel(tr("about.copyright"))
         copyright_.setObjectName("captionLabel")
 
@@ -96,5 +102,6 @@ class AboutDialog(QDialog):
         lay.addWidget(links)
         lay.addWidget(_rule())
         lay.addWidget(notice)
+        lay.addWidget(icons_notice)
         lay.addWidget(copyright_)
         lay.addLayout(row)

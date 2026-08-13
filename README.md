@@ -116,7 +116,23 @@ zip が半分近くまで小さくなるのは、単体 exe の中身が**既に
 展開後のサイズは単体 exe 2 本（228.6 MB）よりフォルダ（303.9 MB）のほうが大きいが、
 これは PySide6 等の共有分よりも「ffmpeg を 2 部持たない」効果が効く前の素の差。
 
-exe に埋め込むアイコン `assets/` は**リポジトリに含めていない**（`cooliocns SVG/` と同じ扱い）。
+#### 同梱しているもののライセンス
+
+| | ライセンス | 表示 |
+|---|---|---|
+| ffmpeg 8.1.2（gyan.dev ビルド） | **GPLv3** | [`vendor/ffmpeg/NOTICE.txt`](vendor/ffmpeg/NOTICE.txt) |
+| coolicons（Kryston Schwarze 氏） | **CC BY 4.0** | [`vendor/coolicons/NOTICE.txt`](vendor/coolicons/NOTICE.txt) |
+
+どちらもビルドに同梱して配布している。**exe の中に入れることと再配布は同じこと**なので、
+「埋め込めば再配布にならない」ということはない。CC BY 4.0 は再配布も商用利用も
+認めているが**表示が必須**なので、アプリの「バージョン情報」と上記 NOTICE の
+両方に記載し、NOTICE はビルドにも同梱している。
+
+アイコンセット本体（`cooliocns SVG/`）はリポジトリに含めていないので、
+クローン直後は [配布元](https://github.com/krystonschwarze/coolicons) から取得して
+リポジトリ直下に `cooliocns SVG/` として置く。
+
+exe に埋め込むアイコン `assets/` も**リポジトリに含めていない**。
 `supercut.spec` が `assets/app.ico` を参照するので、**クローン直後は先にアイコンを生成する**:
 
 ```bash

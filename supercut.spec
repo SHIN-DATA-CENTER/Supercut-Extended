@@ -48,6 +48,10 @@ if _missing:
 
 FFMPEG_DATAS = [(os.path.join(FFMPEG_DIR, f), ".") for f in FFMPEG_FILES]
 
+# coolicons is CC BY 4.0: redistribution is allowed, attribution is required. The
+# notice therefore has to travel with the build, not just sit in the repository.
+ICON_NOTICE = [("vendor/coolicons/NOTICE.txt", "vendor/coolicons")]
+
 QT_EXCLUDES = [
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
     "PySide6.QtWebChannel", "PySide6.QtWebSockets", "PySide6.QtQuick", "PySide6.QtQuick3D",
@@ -97,7 +101,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     # Ship the coolicons set alongside the app; icons.icon_root() finds it via _MEIPASS.
-    datas=[(ICON_DIR, ICON_DIR), ("assets", "assets")] + FFMPEG_DATAS,
+    datas=([(ICON_DIR, ICON_DIR), ("assets", "assets")]
+           + FFMPEG_DATAS + ICON_NOTICE),
     # ccl_chromium_reader resolves several submodules lazily, so pull the package in
     # wholesale rather than trying to enumerate them.
     hiddenimports=[

@@ -1,0 +1,26 @@
+coolicons
+=========
+
+This application bundles and displays icons from the "coolicons" icon set.
+
+    Name      coolicons
+    Author    Kryston Schwarze
+    Source    https://github.com/krystonschwarze/coolicons
+    Licence   Creative Commons Attribution 4.0 International (CC BY 4.0)
+              https://creativecommons.org/licenses/by/4.0/
+
+CC BY 4.0 permits redistribution and commercial use, including shipping the
+icons inside an application, provided attribution is given. That is what this
+file and the credit in the application's About box are for.
+
+The set is redistributed here in its original SVG form, recoloured at runtime
+(the SVGs draw with stroke="currentColor", which QSvgRenderer does not
+implement, so the colour is substituted before rendering). No icon artwork has
+been altered otherwise.
+
+Two glyphs shown in the application are NOT from coolicons: the pointer and the
+scissors used by the clip editor's tool palette. The set contains neither, so
+they were drawn for this project and live in supercut_extended/gui/icons.py.
+
+The icon files themselves are not kept in this repository. See README.md for how
+a checkout obtains them before a build.

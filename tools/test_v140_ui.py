@@ -275,6 +275,12 @@ def check_about(win: MainWindow) -> None:
            "links to the repository")
     expect("GPLv3" in joined,
            "names the ffmpeg licence it redistributes under")
+    # coolicons is CC BY 4.0: redistribution is fine, attribution is the condition.
+    # Putting the files inside the exe does not change that -- they still ship.
+    expect("coolicons" in joined, "credits the icon set by name")
+    expect("Kryston Schwarze" in joined, "and its author")
+    expect("CC BY 4.0" in joined, "and the licence it is used under")
+    expect("krystonschwarze/coolicons" in joined, "with a link to the source")
     expect(len(tr("about.description")) > 100,
            "the description is a real description, not one line",
            f"{len(tr('about.description'))} chars")

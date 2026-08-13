@@ -220,6 +220,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "ffmpeg 8.1.2（gyan.dev ビルド）を同梱しています。ffmpeg は <b>GPLv3</b> で"
             "配布されており、全文と再配布上の注意は同梱の "
             "<code>LICENSE-FFmpeg-GPLv3.txt</code> と <code>NOTICE.txt</code> にあります。",
+        "about.icons":
+            "アイコンは <b>coolicons</b>（Kryston Schwarze 氏）を使用しています。"
+            "<b>CC BY 4.0</b> で配布されており、本アプリはその条件に従って再配布・表示しています。"
+            "<a style='color:#60a5fa' href='https://github.com/krystonschwarze/coolicons'>配布元</a> ／ "
+            "<a style='color:#60a5fa' href='https://creativecommons.org/licenses/by/4.0/'>ライセンス全文</a>",
         "about.copyright": "© 2026 SHIN DATA CENTER",
         "update.title": "アップデート",
         "update.available": "新しいバージョンがあります\n\n現在: {current}  →  最新: {latest}",
@@ -449,6 +454,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "Bundles ffmpeg 8.1.2 (gyan.dev build). ffmpeg is distributed under the "
             "<b>GPLv3</b>; the full text and redistribution notes ship with the app as "
             "<code>LICENSE-FFmpeg-GPLv3.txt</code> and <code>NOTICE.txt</code>.",
+        "about.icons":
+            "Icons are <b>coolicons</b> by Kryston Schwarze, distributed under "
+            "<b>CC BY 4.0</b>; this app redistributes and displays them under those terms. "
+            "<a style='color:#60a5fa' href='https://github.com/krystonschwarze/coolicons'>Source</a> / "
+            "<a style='color:#60a5fa' href='https://creativecommons.org/licenses/by/4.0/'>Licence</a>",
         "about.copyright": "© 2026 SHIN DATA CENTER",
         "update.title": "Update",
         "update.available": "A new version is available\n\nCurrent: {current}  →  Latest: {latest}",
